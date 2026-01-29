@@ -51,7 +51,7 @@ Unlike standard scripts that read text line-by-line, 4IM3-Script **compiles** yo
 ## **III. Logic & Math**
 
 ### **1. Variables & Access**
-* **Source Props:** `pos.x`, `width`, `rotation`, `scale.y`.
+* **Source Props:** `pos.x`, `width`, `rot`, `scale.y`.
 * **Environment:** `screen.width`, `screen.height`.
 * **Custom:** Any variable created with `!var`.
 
