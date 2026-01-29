@@ -1,197 +1,137 @@
-This README documents the **4IM3-Script** language based on your provided files. It covers the syntax, core commands, all built-in animations, and the available API commands you can access directly.
+# 4IM3-Script Documentation
+
+**4IM3-Script** is a high-performance, compiled animation language for OBS Studio. It transforms text commands into native Lua closures, allowing for **instant logic execution**, parallel background tasks, and complex procedural animations at 60+ FPS.
 
 ---
 
-# **4IM3-Script Documentation**
+## **I. The Engine**
 
-**4IM3-Script** is a custom animation and logic language for OBS Studio sources. It allows you to chain commands, perform math on source properties (like position or scale), and create complex logic loops.
+### **1. Compiled Architecture**
+Unlike standard scripts that read text line-by-line, 4IM3-Script **compiles** your code when you save.
+* **Instant Logic:** Commands like `!var`, `!if`, and math `()` run instantly (0ms). The script only pauses when it hits a `!wait` or a movement command.
+* **Batch Processing:** You can run hundreds of logic checks in a single frame without lag.
 
-## **I. The Basics**
+### **2. Syntax Basics**
+`!command | arg1 | arg2 |+| !next_command`
 
-### **Syntax Structure**
-
-Commands are separated by the sequence separator `|+|`. Arguments inside a command are separated by pipes `|`.
-
-`!command | argument_1 | argument_2 |+| !next_command`
-
-* **`!`**: All commands start with a bang.
-* **`|`**: Separator for arguments.
-* **`|+|`**: Separator for command blocks (lines).
-* **`--`**: Comments. Anything after `--` is ignored (unless it is part of a math operator like `--1`).
-
-### **Variables & Math**
-
-You can use variables (like `screen.width` or `pos.x`) anywhere a number is expected.
-
-* **Dot Notation**: Access properties directly (e.g., `pos.x`, `scale.y`, `bounds.x`).
-* **Inline Math**: Wrap equations in parentheses `()`.
-* Example: `!move|x:(screen.width / 2 - 100)`
-
-
-* **Relative Operators**:
-* `++`: Add (e.g., `x:++10` moves right 10px).
-* `--`: Subtract (e.g., `y:--10` moves up 10px).
-* `**`: Multiply.
-
-
+* **`!`**: Command prefix.
+* **`|`**: Argument separator.
+* **`|+|`**: Line separator.
+* **`--`**: Comments (ignored by compiler).
 
 ---
 
 ## **II. Core Commands**
 
-These are the fundamental commands for moving sources and controlling the script flow.
-
+### **Flow Control & Logic**
 | Command | Syntax | Description |
-| --- | --- | --- |
-| **`!move`** | `!move|axis:val|time` | Moves the source over time. <br>
+| :--- | :--- | :--- |
+| **`!wait`** | `!wait\|time` | Pauses the script for a duration. <br>Ex: `!wait\|500ms` |
+| **`!var`** | `!var\|name\|val` | Sets a variable. Supports math. <br>Ex: `!var\|mid\|((screen.width - width)/2)` |
+| **`!if`** | `!if\|v1\|op\|v2\|TARGET` | Jumps to a `!label` OR runs a `!@func` if true. <br>Ex: `!if\|pos.x\|>\|1920\|@reset()` |
+| **`!jump`** | `!jump\|LABEL` | Instantly moves execution to a label. |
+| **`!label`** | `!label\|NAME` | Marks a location in the code. |
+| **`!loop`** | `!loop` | Jumps back to line 1. |
+| **`!log`** | `!log\|msg` | Prints text/variables to the OBS Script Log. |
 
-<br>Ex: `!move|x:500,y:200|1s` |
-| **`!wait`** | `!wait|time` | Pauses execution. <br>
+### **Movement & Animation**
+| Command | Syntax | Description |
+| :--- | :--- | :--- |
+| **`!move`** | `!move\|axis:val\|time` | Interpolates position/scale/rotation. <br>Ex: `!move\|x:500, y:200\|1s` |
+| **`!easing`** | `!easing\|type` | Sets the curve for `!move`. <br>Options: `linear`, `sine_inout`, `back_out`, `quad_in`. |
 
-<br>Ex: `!wait|500ms` |
-| **`!var`** | `!var|name|value` | Sets a variable. <br>
-
-<br>Ex: `!var|start_x|pos.x` |
-| **`!if`** | `!if|v1|op|v2|target` | Checks a condition. If true, jumps to a label or runs a function.<br>
-
-<br>Ex: `!if|pos.x|>|1920|RESET` |
-| **`!jump`** | `!jump|LABEL_NAME` | Jumps immediately to a specific `!label`. |
-| **`!label`** | `!label|NAME` | Marks a spot in the code to jump to. |
-| **`!loop`** | `!loop` | Restarts the script from the very first line. |
-| **`!log`** | `!log|msg_or_var` | Prints a message or variable value to the OBS Script Log. |
-
----
-
-## **III. Predefined Animations**
-
-These are built-in effects you can use immediately. Most accept a **duration** (how long to run). If duration is `0` or omitted, they run infinitely until interrupted.
-
-| Animation | Syntax | Description |
-| --- | --- | --- |
-| **Rainbow** | `!rainbow|speed|duration` | Cycles the source color (gradient) through RGB spectrum.<br>
-
-<br>Ex: `!rainbow|0.5|5s` |
-| **Shake** | `!shake|intensity|duration` | Randomly vibrates the source position.<br>
-
-<br>Ex: `!shake|10|1s` |
-| **Glitch** | `!glitch|intensity|duration` | Randomly teleports and stretches the source for a digital glitch effect.<br>
-
-<br>Ex: `!glitch|20|200ms` |
-| **Breathing** | `!breathing|speed|duration` | Gently pulses scale and opacity.<br>
-
-<br>Ex: `!breathing|0.05|0` (Infinite) |
-| **DVD Bounce** | `!dvd|speed|duration` | Bounces the source off the edges of the screen/bounds.<br>
-
-<br>Ex: `!dvd|5|10s` |
-| **Sway** | `!sway|speed|duration` | Gently rotates the source back and forth.<br>
-
-<br>Ex: `!sway|0.05|0` |
+### **Multitasking (Parallelism)**
+| Command | Syntax | Description |
+| :--- | :--- | :--- |
+| **`!run`** | `!run\|cmd\|args...` | Spawns a **background task**. Runs in parallel with main script. <br>Ex: `!run\|rainbow\|0.5\|0` |
+| **`!stop`** | `!stop` | Kills all active background tasks. |
 
 ---
 
-## **IV. Logic Functions (@Functions)**
+## **III. Logic & Math**
 
-You can run these inside math equations `()` or execute them directly using `!@name`.
+### **1. Variables & Access**
+* **Source Props:** `pos.x`, `width`, `rotation`, `scale.y`.
+* **Environment:** `screen.width`, `screen.height`.
+* **Custom:** Any variable created with `!var`.
 
-**Usage:**
+### **2. Advanced Math**
+* **Nested Parentheses:** Supported natively. <br>`!var | center | ((screen.width - 200) / 2)`
+* **Relative Operators:** <br>`x:++100` (Add), `y:--50` (Sub), `scale:**2` (Multiply).
 
-* **Direct:** `!@alert(Hello World)`
-* **In Math:** `!move|x:(@sin(@time()) * 100)`
+### **3. The Function Registry (`@Functions`)**
+Use these inside math `()` or execute them directly via `!@name`.
 
 | Function | Syntax | Description |
-| --- | --- | --- |
-| **`@random`** | `@random(min, max)` | Returns a random integer between min and max. |
-| **`@time`** | `@time()` | Returns the current OS clock time (in seconds). |
-| **`@round`** | `@round(val)` | Rounds a number to the nearest integer. |
-| **`@sin` / `@cos**` | `@sin(val)` | Returns the Sine/Cosine of a value. |
-| **`@min` / `@max**` | `@min(a, b)` | Returns the smaller/larger of two numbers. |
-| **`@alert`** | `@alert(msg)` | Logs a warning message to the OBS log. |
+| :--- | :--- | :--- |
+| **`@random`** | `@random(min, max)` | Returns random integer. |
+| **`@dist`** | `@dist(x1,y1, x2,y2)` | Returns distance between two points. |
+| **`@time`** | `@time()` | Returns current OS time (seconds). |
+| **`@sin` / `@cos`** | `@sin(val)` | Trigonometry helpers. |
+| **`@alert`** | `@alert(msg)` | Logs a message (Execution version of `!log`). |
 
-*Note: Standard math functions like `floor`, `ceil`, `tan`, `sqrt`, `abs`, `log`, `exp` are also supported.*
+**Usage Examples:**
+* `!move | x:(@sin(@time()) * 100) | 1s`
+* `!if | @random(1,100) | > | 50 | WINNER`
+* `!@alert(System Ready)`
 
 ---
 
-## **V. API Direct Access (obj_source_t)**
+## **IV. Animation Presets**
 
-If a command isn't in the "Core Commands" list (like `!scale` or `!rot`), the script falls back to the internal API wrapper (`obj_source_t`). You can call any of these directly.
+Built-in effects. Duration `0` = Infinite.
 
-**Syntax for API calls:**
-`!command | argument` OR `!command | key:value, key:value`
+| Preset | Syntax | Description |
+| :--- | :--- | :--- |
+| **Rainbow** | `!rainbow\|spd\|dur` | Cycles color through RGB spectrum. |
+| **Shake** | `!shake\|amp\|dur` | Random position vibration. |
+| **Glitch** | `!glitch\|amp\|dur` | Digital stutter/stretch effect. |
+| **Breathing** | `!breathing\|spd\|dur` | Smooth scale/opacity pulse. |
+| **DVD** | `!dvd\|spd\|dur` | Bounces off screen edges. |
+| **Sway** | `!sway\|spd\|dur` | Gentle rotation back and forth. |
 
-### **Transform & Dimensions**
+---
 
-| Command | Arguments | Description |
-| --- | --- | --- |
-| **`!pos`** | `x:val, y:val` | Instantly sets position. <br>
+## **V. Direct API Access**
 
-<br>Ex: `!pos|x:0, y:0` |
-| **`!scale`** | `x:val, y:val` | Sets scale factor (1 = 100%). <br>
+If a command isn't a preset, the engine searches the source object directly.
+* **Multi-Arg Support:** `0,255,0` is auto-split.
+* **Dot-Notation:** `style.grad.color` automatically walks the object tree.
 
-<br>Ex: `!scale|x:1.5, y:1.5` |
-| **`!rot`** | `val` | Sets rotation in degrees. <br>
-
-<br>Ex: `!rot|90` |
-| **`!width`** | `val` | Sets width in pixels. <br>
-
-<br>Ex: `!width|1920` |
-| **`!height`** | `val` | Sets height in pixels. <br>
-
-<br>Ex: `!height|1080` |
-| **`!bounds`** | `x:val, y:val` | Sets the bounding box size (if bounds are enabled). |
-| **`!crop`** | `left:v, right:v...` | Crops the source. keys: `top`, `bottom`, `left`, `right`. |
-| **`!align`** | `val` | Sets alignment integer (Obs alignment enum). |
-
-### **Visibility & Management**
-
-| Command | Arguments | Description |
-| --- | --- | --- |
-| **`!hide`** | *(None)* | Hides the source. |
-| **`!show`** | *(None)* | Shows the source. |
-| **`!remove`** | *(None)* | **Deletes** the scene item from the scene. |
-
-### **Style & Color**
-
-| Command | Arguments | Description |
-| --- | --- | --- |
-| **`!style.opacity`** | `val` | Sets opacity (0.0 to 1.0). <br>
-
-<br>Ex: `!style.opacity|0.5` |
-| **`!style.color`** | `r, g, b` | Sets source color overlay.<br>
-
-<br>Ex: `!style.color|255, 0, 0` |
-| **`!style.grad.enable`** | *(None)* | Enables the gradient filter. |
-| **`!style.grad.color`** | `r, g, b` | Sets the gradient color. |
-| **`!style.grad.dir`** | `val` | Sets gradient direction (degrees). |
+| Target | Command Syntax |
+| :--- | :--- |
+| **Position** | `!pos\|x:0, y:0` |
+| **Scale** | `!scale\|x:1, y:1` |
+| **Rotation** | `!rot\|90` |
+| **Dimensions** | `!width\|1920` / `!height\|1080` |
+| **Cropping** | `!crop\|left:10, right:10` |
+| **Opacity** | `!style.opacity\|0.5` |
+| **Color** | `!style.color\|255, 0, 0` |
+| **Gradient** | `!style.grad.enable` <br> `!style.grad.color\|255,0,255` |
+| **Visibility** | `!hide` / `!show` |
 
 ---
 
 ## **VI. Example Scripts**
 
-**1. Simple Bounce**
+### **1. The "Elastic Magnetic Orb"**
+*Demonstrates High-Performance Logic, Math, and Easing.*
 
 ```text
-!var|bottom|(screen.height - height) |+|
-!label|TOP |+|
-!move|y:bottom|1s |+|
-!move|y:0|1s |+|
-!jump|TOP
+-- [[ SETUP ]]
+!stop |+|
+!run|breathing|0.05|0 |+|
+!style.grad.enable |+|
 
-```
+!label|WAIT |+|
+-- 1. Drift to Center (Single-line math)
+!easing|sine_inout |+|
+!move|x:((screen.width - width)/2), y:((screen.height - height)/2)|2s |+|
+!wait|@random(1000, 2000) |+|
 
-**2. Random Teleport (Chaos)**
+-- 2. Zap to Random Location
+!easing|back_out |+|
+!move|x:@random(0, (screen.width-width)), y:@random(0, (screen.height-height))|300ms |+|
+!shake|10|300ms |+|
 
-```text
-!label|CHAOS |+|
-!pos|x:@random(0, 1920), y:@random(0, 1080) |+|
-!wait|200ms |+|
-!jump|CHAOS
-
-```
-
-**3. Rainbow DVD Logo**
-
-```text
-!rainbow|0.5|0 |+|   -- Infinite Rainbow
-!dvd|5|0 |+|         -- Infinite Bounce
-
-```
+!jump|WAIT
