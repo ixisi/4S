@@ -105,9 +105,9 @@ If a command isn't a preset, the engine searches the source object directly.
 | **Rotation** | `!rot\|90` |
 | **Dimensions** | `!width\|1920` / `!height\|1080` |
 | **Cropping** | `!crop\|left:10, right:10` |
-| **Opacity** | `!style.opacity\|0.5` |
-| **Color** | `!style.color\|255, 0, 0` |
-| **Gradient** | `!style.grad.enable` <br> `!style.grad.color\|255,0,255` |
+| **Opacity** | `!style.opacity\|0.5` <br> `!style.bg_opacity\|0.35` |
+| **Color** | `!style.color\|255, 0, 0` <br> `!style.bg_color\|0,255,0`|  
+| **Gradient** | `!style.grad.enable/disable` <br> `!style.grad.color\|255,0,255` <br> `!style.grad.opacity\|0.2` <br> `!style.grad.dir\|15` |
 | **Visibility** | `!hide` / `!show` |
 
 ---
@@ -121,7 +121,6 @@ If a command isn't a preset, the engine searches the source object directly.
 -- [[ SETUP ]]
 !stop |+|
 !run|breathing|0.05|0 |+|
-!style.grad.enable |+|
 
 !label|WAIT |+|
 -- 1. Drift to Center (Single-line math)
