@@ -1,136 +1,245 @@
-# 4IM3-Script Documentation
 
-**4IM3-Script** is a high-performance, compiled animation language for OBS Studio. It transforms text commands into native Lua closures, allowing for **instant logic execution**, parallel background tasks, and complex procedural animations at 60+ FPS.
+# 4IM3 Animation & Scripting Engine for OBS
 
----
+**4IM3** is a lightweight, asynchronous 2D animation engine that runs natively inside OBS via Lua. It allows you to write custom, highly performant animations, interactive stream overlays, and even complete 2D mini-games directly onto your OBS canvas without needing external software.
 
-## **I. The Engine**
+## Features
 
-### **1. Compiled Architecture**
-Unlike standard scripts that read text line-by-line, 4IM3-Script **compiles** your code when you save.
-* **Instant Logic:** Commands like `!var`, `!if`, and math `()` run instantly (0ms). The script only pauses when it hits a `!wait` or a movement command.
-* **Batch Processing:** You can run hundreds of logic checks in a single frame without lag.
-
-### **2. Syntax Basics**
-`!command | arg1 | arg2 |+| !next_command`
-
-* **`!`**: Command prefix.
-* **`|`**: Argument separator.
-* **`|+|`**: Line separator.
-* **`--`**: Comments (ignored by compiler).
+* **Custom Scripting Syntax:** Easy-to-read, pipe-delimited syntax.
+* **True Asynchronous Threading:** Run multiple animations, particle spawners, and logic loops simultaneously without freezing OBS.
+* **Scope-Protected Memory:** Professional-grade local and global variable isolation to prevent memory leaks.
+* **Event-Driven Architecture:** CPU-friendly `on_change` watchers, hotkeys, and AABB collision detection.
+* **Dynamic Math & Interpolation:** Evaluate math equations and object properties dynamically at runtime.
 
 ---
 
-## **II. Core Commands**
+## 📖 Syntax Basics
 
-### **Flow Control & Logic**
-| Command | Syntax | Description |
-| :--- | :--- | :--- |
-| **`!wait`** | `!wait\|time` | Pauses the script for a duration. <br>Ex: `!wait\|500ms` |
-| **`!var`** | `!var\|name\|val` | Sets a variable. Supports math. <br>Ex: `!var\|mid\|((screen.width - width)/2)` |
-| **`!if`** | `!if\|v1\|op\|v2\|TARGET` | Jumps to a `!label` OR runs a `!@func` if true. <br>Ex: `!if\|pos.x\|>\|1920\|@reset()` |
-| **`!jump`** | `!jump\|LABEL` | Instantly moves execution to a label. |
-| **`!label`** | `!label\|NAME` | Marks a location in the code. |
-| **`!loop`** | `!loop` | Jumps back to line 1. |
-| **`!log`** | `!log\|msg` | Prints text/variables to the OBS Script Log. |
-
-### **Movement & Animation**
-| Command | Syntax | Description |
-| :--- | :--- | :--- |
-| **`!move`** | `!move\|axis:val\|time` | Interpolates position/scale/rotation. <br>Ex: `!move\|x:500, y:200\|1s` |
-| **`!easing`** | `!easing\|type` | Sets the curve for `!move`. <br>Options: `linear`, `sine_inout`, `back_out`, `quad_in`. |
-
-### **Multitasking (Parallelism)**
-| Command | Syntax | Description |
-| :--- | :--- | :--- |
-| **`!run`** | `!run\|cmd\|args...` | Spawns a **background task**. Runs in parallel with main script. <br>Ex: `!run\|rainbow\|0.5\|0` |
-| **`!stop`** | `!stop` | Kills all active background tasks. |
-
----
-
-## **III. Logic & Math**
-
-### **1. Variables & Access**
-* **Source Props:** `pos.x`, `width`, `rot`, `scale.y`.
-* **Environment:** `screen.width`, `screen.height`.
-* **Custom:** Any variable created with `!var`.
-
-### **2. Advanced Math**
-* **Nested Parentheses:** Supported natively. <br>`!var | center | ((screen.width - 200) / 2)`
-* **Relative Operators:** <br>`x:++100` (Add), `y:--50` (Sub), `scale:**2` (Multiply).
-
-### **3. The Function Registry (`@Functions`)**
-Use these inside math `()` or execute them directly via `!@name`.
-
-| Function | Syntax | Description |
-| :--- | :--- | :--- |
-| **`@random`** | `@random(min, max)` | Returns random integer. |
-| **`@dist`** | `@dist(x1,y1, x2,y2)` | Returns distance between two points. |
-| **`@time`** | `@time()` | Returns current OS time (seconds). |
-| **`@sin` / `@cos`** | `@sin(val)` | Trigonometry helpers. |
-| **`@alert`** | `@alert(msg)` | Logs a message (Execution version of `!log`). |
-
-**Usage Examples:**
-* `!move | x:(@sin(@time()) * 100) | 1s`
-* `!if | @random(1,100) | > | 50 | WINNER`
-* `!@alert(System Ready)`
-
----
-
-## **IV. Animation Presets**
-
-Built-in effects. Duration `0` = Infinite.
-
-| Preset | Syntax | Description |
-| :--- | :--- | :--- |
-| **Rainbow** | `!rainbow\|spd\|dur` | Cycles color through RGB spectrum. |
-| **Shake** | `!shake\|amp\|dur` | Random position vibration. |
-| **Glitch** | `!glitch\|amp\|dur` | Digital stutter/stretch effect. |
-| **Breathing** | `!breathing\|spd\|dur` | Smooth scale/opacity pulse. |
-| **DVD** | `!dvd\|spd\|dur` | Bounces off screen edges. |
-| **Sway** | `!sway\|spd\|dur` | Gentle rotation back and forth. |
-
----
-
-## **V. Direct API Access**
-
-If a command isn't a preset, the engine searches the source object directly.
-* **Multi-Arg Support:** `0,255,0` is auto-split.
-* **Dot-Notation:** `style.grad.color` automatically walks the object tree.
-
-| Target | Command Syntax |
-| :--- | :--- |
-| **Position** | `!pos\|x:0, y:0` |
-| **Scale** | `!scale\|x:1, y:1` |
-| **Rotation** | `!rot\|90` |
-| **Dimensions** | `!width\|1920` / `!height\|1080` |
-| **Cropping** | `!crop\|left:10, right:10` |
-| **Opacity** | `!style.opacity\|0.5` <br> `!style.bg_opacity\|0.35` |
-| **Color** | `!style.color\|255, 0, 0` <br> `!style.bg_color\|0,255,0`|  
-| **Gradient** | `!style.grad.enable/disable` <br> `!style.grad.color\|255,0,255` <br> `!style.grad.opacity\|0.2` <br> `!style.grad.dir\|15` |
-| **Visibility** | `!hide` / `!show` |
-
----
-
-## **VI. Example Scripts**
-
-### **1. The "Elastic Magnetic Orb"**
-*Demonstrates High-Performance Logic, Math, and Easing.*
+Every command in 4IM3 starts with `!` and ends with the execution delimiter `|+|`. Arguments are separated by pipes `|`.
 
 ```text
--- [[ SETUP ]]
-!stop |+|
-!run|breathing|0.05|0 |+|
+!command|argument_1|argument_2 |+|
+```
 
-!label|WAIT |+|
--- 1. Drift to Center (Single-line math)
-!easing|sine_inout |+|
-!move|x:((screen.width - width)/2), y:((screen.height - height)/2)|2s |+|
-!wait|@random(1000, 2000) |+|
+### Comments
 
--- 2. Zap to Random Location
-!easing|back_out |+|
-!move|x:@random(0, (screen.width-width)), y:@random(0, (screen.height-height))|300ms |+|
-!shake|10|300ms |+|
+```text
+-- This is a single line comment. It must have its own line.
+--[[ 
+This is a multi-line block comment.
+The engine will perfectly ignore everything in here! 
+]]
 
-!jump|WAIT
+```
+
+### Dot-Notation & Properties
+
+You can access live properties of your OBS sources directly in your math equations:
+
+```text
+!var|player|source(Hero) |+|
+!source|health_bar |+|
+!pin|player|x:((player.width - width) / 2), y:player.height |+|
+
+```
+
+---
+
+## 📦 Variable & Memory Management
+
+4IM3 utilizes a strict memory model to protect background threads from corrupting the main game state.
+
+* **`!var|name|value`**: Creates or modifies a variable. If inside a `!run` thread, this creates a temporary **Local** variable.
+* **`!gvar|name|value`**: Explicitly creates or modifies a **Global** variable across the entire engine.
+
+**Math Operations:**
+You can use relative math strings or wrap equations in parentheses.
+
+```text
+!var|score|++10 |+|          -- Adds 10 to score
+!gvar|health|--1 |+|         -- Subtracts 1 from global health
+!var|center_x|(1920 / 2) |+| -- Evaluates the math
+
+```
+
+---
+
+## 🎯 Source Management
+
+Before you can animate an object, you must select it.
+
+| Command | Example | Description |
+| --- | --- | --- |
+| `!source` | `!source | Hero|+ |
+| `@clone` | `!var | clone_id|@clone()|+ |
+| `!show` / `!hide` | `!hide|+ | ` |
+| `!delete_source` | `!delete_source|+ | ` |
+
+---
+
+## 🎬 Animation & Transformation
+
+4IM3 includes a robust tweening engine.
+
+**`!move | properties | duration | easing`**
+Moves, scales, or rotates a source over time.
+
+```text
+!move|x:500, y:++50, rot:360|1.5s|quad_out |+|
+
+```
+
+*Supported Easings:* `linear`, `quad_in`, `quad_out`, `quad_inout`, `sine_inout`, `back_out`, `elastic_out`, `bounce_out`.
+
+**`!pos`, `!scale`, `!rot` (Instant Transformations)**
+Instantly snaps a source to a value without animation.
+
+```text
+!pos|x:960, y:540 |+|
+!scale|x:1.5, y:1.5 |+|
+
+```
+
+**Advanced Animations:**
+
+* `!path | cp_x:val, cp_y:val | target_x:val, target_y:val | duration | easing` (Bezier Curves)
+* `!spiral | center_x, center_y | start_radius | rotations | duration | easing`
+* `!fade | target_opacity | duration | easing`
+* `!pin | parent_source | offsets` (Glues one source to another)
+
+---
+
+## 🧠 Logic & Control Flow
+
+Control the flow of your script using loops, jumps, and conditional subroutines.
+
+**Labels & Jumps (Loops)**
+
+```text
+!label|MyLoop |+|
+    !move|y:++10|1s|sine_inout |+|
+    !then|move|y:--10|1s|sine_inout |+|
+    !jump|MyLoop |+|
+
+```
+
+**If Statements (`!if | val1 | operator | val2 | TargetLabel | Mode`)**
+
+```text
+-- Standard Jump (Leaves the current loop permanently)
+!if|health|<=|0|DeathScreen |+|
+
+-- Conditional Subroutine (Requires 'CALL' flag. Will return to this spot!)
+!if|score|==|100|PlayCheer|CALL |+| 
+
+```
+
+**`!run{ ... }` (Background Threads)**
+Spawns an isolated, asynchronous background thread. Perfect for particle spawners or overlapping animations.
+
+```text
+!run{
+    !var|particle|@clone() |+|
+    !source|particle |+|
+    !move|y:1080|2s |+|
+    !delete_source |+|
+}|+|
+
+```
+
+**`!wait | duration`**
+Pauses the current thread.
+
+```text
+!wait|0.5s |+|
+
+```
+
+---
+
+## ⚡ Event Listeners (Watchers)
+
+Never use infinite loops to check variables! Use CPU-friendly event listeners.
+
+**`!on_change | variable | [operator] | [value] | LabelName`**
+Wakes up and spawns a thread *only* when a variable changes.
+
+```text
+!on_change|health|<=|0|GameOver |+|
+!on_change|score|UpdateScoreUI |+|
+
+```
+
+**`!onpress | Hotkey_Name | LabelName`**
+Registers an OBS Hotkey. When pressed, safely spawns a background thread.
+
+```text
+!onpress|Shoot_Key|FireBullet |+|
+
+```
+
+**`!on_collision | source_1 | source_2 | LabelName`**
+Fires a background thread when two source bounding boxes overlap.
+
+```text
+!on_collision|player|bullet|TakeDamage |+|
+
+```
+
+---
+
+## 🎨 Styling & FX Library
+
+Modify OBS source filters and text properties dynamically.
+
+| Command | Example | Description |
+| --- | --- | --- |
+| `!text` | `!text|Score: score|+ | ` |
+| `!style.color` | `!style.color|255|0|0|+ | ` |
+| `!shake` | `!shake|15|0.5s|+ | ` |
+| `!glitch` | `!glitch|20|1s|+ | ` |
+| `!rainbow` | `!rainbow|0.01|0s|+ | ` |
+| `!breathing` | `!breathing|0.05|0s|+ | ` |
+
+---
+
+## 🚀 Quick Example: Particle Spawner
+
+Here is a complete script demonstrating threading, scoping, and cleanup.
+
+```text
+!var|base_particle|source(Asteroid) |+|
+!source|base_particle |+| !hide |+|
+
+!label|ParticleSpawner |+|
+    !run{
+        -- 1. Setup Clone
+        !source|base_particle |+|
+        !var|clone_id|@clone(true) |+|
+        !source|clone_id |+|
+        
+        -- 2. Randomize Start Position
+        !pos|x:(math.random(0, 1920 - width)), y:-200 |+|
+        !show |+|
+        
+        -- 3. Dynamic Math Trajectories
+        !var|fall_time|(math.random(2, 6)) |+|
+        !var|spin|(math.random(-360, 360)) |+|
+        
+        -- 4. Animate and Clean up
+        !move|y:1200, rot:spin|fall_time |+|
+        !delete_source |+|
+    }|+|
+    
+    !wait|0.5s |+|
+    !jump|ParticleSpawner |+|
+
+```
+
+---
+
+### Installation
+
+1. Add `4IM3-SCRIPT.lua` to your OBS Scripts folder (`Tools -> Scripts`).
+2. Select your text file or type your code into the provided Script UI.
+3. Click **Execute** and watch your canvas come alive!
