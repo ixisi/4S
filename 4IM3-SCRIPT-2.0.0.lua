@@ -97,8 +97,8 @@ function compile_line(cmd, args)
 
         local skip_commands = { 
             ["gvar"]= true, ["var"]=true, ["label"]=true, ["jump"]=true, ["call"]=true, 
-            ["on_change"]=true, ["attach"]=true, ["pin"]=true, ["source"]=true, 
-            ["if"]=true, ["run"]=true, ["on_collision"]=true, 
+            ["change"]=true, ["attach"]=true, ["pin"]=true, ["source"]=true, 
+            ["if"]=true, ["run"]=true, ["collision"]=true, 
             ["array.push"]=true, ["array.clear"]=true, ["foreach"]=true,
             ["array.pop"]=true, ["array.remove"]=true,
             ["media"]=true, ["media_time"]=true, ["filter"]=true,
@@ -856,7 +856,7 @@ ANIM_LIB["attach"] = function(src, state, args)
     return true
 end
 
-ANIM_LIB["on_change"] = function(src, state, args)
+ANIM_LIB["change"] = function(src, state, args)
     if not src.watchers then src.watchers = {} end
     
     local var, op, val, label
@@ -1558,7 +1558,7 @@ SCRIPT_FUNCS = {
     end,
 
 
-    delete_source = function(src)
+    delete = function(src)
         if src.scene_item and src.scene_item.remove then
             src.scene_item.remove()
         end
@@ -4972,4 +4972,5 @@ end
             return v()
         end
     -- [[ API UTILS END ]]
+
 -- [[ OBS CUSTOM API END ]]
