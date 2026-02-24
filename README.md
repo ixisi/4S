@@ -1,245 +1,153 @@
+# 4IM3 Scripting Engine for OBS Studio (v2.0.0)
 
-# 4IM3 Animation & Scripting Engine for OBS
+A highly advanced, multithreaded Lua scripting engine built directly for OBS Studio. 4IM3 transforms OBS from a simple broadcasting tool into a dynamic, logic-driven environment capable of running games, complex cinematic automations, and interactive stream widgets.
 
-**4IM3** is a lightweight, asynchronous 2D animation engine that runs natively inside OBS via Lua. It allows you to write custom, highly performant animations, interactive stream overlays, and even complete 2D mini-games directly onto your OBS canvas without needing external software.
-
-## Features
-
-* **Custom Scripting Syntax:** Easy-to-read, pipe-delimited syntax.
-* **True Asynchronous Threading:** Run multiple animations, particle spawners, and logic loops simultaneously without freezing OBS.
-* **Scope-Protected Memory:** Professional-grade local and global variable isolation to prevent memory leaks.
-* **Event-Driven Architecture:** CPU-friendly `on_change` watchers, hotkeys, and AABB collision detection.
-* **Dynamic Math & Interpolation:** Evaluate math equations and object properties dynamically at runtime.
+## ✨ Key Features
+* **Multithreaded Execution:** Spawn parallel background tasks that execute simultaneously without locking up the OBS UI.
+* **"Read-Through" Memory Model:** True lexical scoping. Background threads capture local loop variables while maintaining live access to global states.
+* **Delta-Time Physics:** Framerate-independent animations guarantee smooth scaling, moving, and fading regardless of stream FPS.
+* **Total OBS Dominion:** Manipulate Scene Items, Filters, Audio Sources, Media Timelines, and Scene Transitions directly from your scripts.
+* **Built-in VFX Library:** Instantly trigger complex visual effects like glitches, screen shakes, and rainbow cycles with a single command.
 
 ---
 
-## 📖 Syntax Basics
-
-Every command in 4IM3 starts with `!` and ends with the execution delimiter `|+|`. Arguments are separated by pipes `|`.
-
-```text
-!command|argument_1|argument_2 |+|
-```
-
-### Comments
-
-```text
--- This is a single line comment. It must have its own line.
---[[ 
-This is a multi-line block comment.
-The engine will perfectly ignore everything in here! 
-]]
-
-```
-
-### Dot-Notation & Properties
-
-You can access live properties of your OBS sources directly in your math equations:
-
-```text
-!var|player|source(Hero) |+|
-!source|health_bar |+|
-!pin|player|x:((player.width - width) / 2), y:player.height |+|
-
-```
+## 🚀 Installation
+1. Download `4IM3-SCRIPT-2.0.0.lua`.
+2. Open OBS Studio.
+3. Navigate to **Tools > Scripts**.
+4. Click the **+** icon and add the Lua file.
+5. Use the provided script text box to write your logic, or link to an external text file.
 
 ---
 
-## 📦 Variable & Memory Management
+## 📖 Syntax Overview
+The engine uses a strict, highly parsable command syntax:
+`!command_name | argument_1 | argument_2 |+|`
 
-4IM3 utilizes a strict memory model to protect background threads from corrupting the main game state.
+* Every command starts with `!`
+* Arguments are separated by `|`
+* Every line **must** end with the execution terminator `|+|`
 
-* **`!var|name|value`**: Creates or modifies a variable. If inside a `!run` thread, this creates a temporary **Local** variable.
-* **`!gvar|name|value`**: Explicitly creates or modifies a **Global** variable across the entire engine.
+### The Universal Time Parser
+Any command requiring a duration accepts highly readable time formats. The engine standardizes them automatically:
+* `500ms` (Milliseconds)
+* `2.5s` (Seconds)
+* `1m` (Minutes)
 
-**Math Operations:**
-You can use relative math strings or wrap equations in parentheses.
-
-```text
-!var|score|++10 |+|          -- Adds 10 to score
-!gvar|health|--1 |+|         -- Subtracts 1 from global health
-!var|center_x|(1920 / 2) |+| -- Evaluates the math
-
-```
-
----
-
-## 🎯 Source Management
-
-Before you can animate an object, you must select it.
-
-| Command | Example | Description |
-| --- | --- | --- |
-| `!source` | `!source | Hero|+ |
-| `@clone` | `!var | clone_id|@clone()|+ |
-| `!show` / `!hide` | `!hide|+ | ` |
-| `!delete_source` | `!delete_source|+ | ` |
+### Easing Library
+For animations like `!move` or `!fade`, the engine supports the following curves:
+`linear`, `quad_in`, `quad_out`, `quad_inout`, `sine_inout`, `back_out`, `elastic_out`, `bounce_out`
 
 ---
 
-## 🎬 Animation & Transformation
+## 🛠️ Command Reference
 
-4IM3 includes a robust tweening engine.
+### 1. Variables & Logic
+* `!var|name|value |+|` - Creates/updates a local variable. Supports relative math (`++1`, `--1`).
+* `!gvar|name|value |+|` - Creates/updates a global game-state variable.
+* `!if|val1|operator|val2|TargetLabel |+|` - Conditional logic. Jumps to `TargetLabel` if true.
+* `!label|Name |+|` - Defines a jump point in the script.
+* `!jump|Name |+|` - Instantly moves execution to a label.
+* `!call|Name |+|` - Executes a label and returns.
+* `!return |+|` - Ends the current execution block.
+* `!include|filepath |+|` - Imports and executes an external script file.
 
-**`!move | properties | duration | easing`**
-Moves, scales, or rotates a source over time.
+### 2. Arrays & Multithreading
+* `!array.push|array_name|value |+|` - Adds an item to a specific array.
+* `!array.pop|array_name|save_var |+|` - Removes the last item and optionally saves it.
+* `!array.remove|array_name|value |+|` - Finds and deletes a specific value from the array.
+* `!array.clear|array_name |+|` - Empties the array.
+* `!foreach|array_name|item_var|LabelName |+|` - Iterates through an array, spawning a parallel thread for each item.
+* `!run{ ... }|+|` - Spawns a parallel background thread with a frozen snapshot of local variables.
+* `!stop |+|` - Kills all background tasks immediately.
+* `!wait|duration |+|` - Pauses the current thread for the specified time.
+* `!loop |+|` - Restarts the current execution block from the beginning.
+* `!then |+|` - Chains execution (waits for previous async tasks to finish).
 
-```text
-!move|x:500, y:++50, rot:360|1.5s|quad_out |+|
+### 3. Events & Listeners
+* `!onpress|HotkeyName|Label |+|` - Listens for a specific keyboard shortcut.
+* `!on_change|VariableName|Label |+|` - Triggers a label when a variable's value changes.
+* `!on_collision|SourceA|SourceB|Label |+|` - Triggers a label when two sources overlap.
 
-```
+### 4. Source Control & Transformations
+* `!source|SourceName |+|` - Targets an OBS source for subsequent commands.
+* `!delete_source|SourceName |+|` - Completely deletes a source from OBS.
+* `!move|x:val, y:val|duration|easing |+|` - Smoothly translates a source.
+* `!fade|opacity_level|duration|easing |+|` - Transitions opacity (0 to 100).
+* `!pin|parent_source|offsets |+|` - Glues a source to another (e.g., `!pin|Hero|x:0, y:20`).
+* `!attach|target_source|label_name |+|` - Binds a source to a specific script label.
+* `!path|control_x,control_y|target_x,target_y|duration|easing |+|` - Moves a source along a set of coordinates.
+* `!spiral|x,y|radius|rotations|duration|easing |+|` - Moves a source in a spiral pattern.
 
-*Supported Easings:* `linear`, `quad_in`, `quad_out`, `quad_inout`, `sine_inout`, `back_out`, `elastic_out`, `bounce_out`.
+### 5. Advanced OBS Control (Media, Audio, Scenes, Filters)
+* `!filter|Target|FilterName|Prop|Val|duration |+|` - Instantly snaps or smoothly tweens an OBS filter property.
+* `!media|SourceName|play/pause/stop/seek |+|` - Controls video timelines.
+* `!media_time|SourceName|save_var |+|` - Reads current video playback time into a local variable.
+* `!sound|SourceName|action_or_volume|val|duration |+|` - Triggers audio or fades volume.
+* `!switch|SceneName |+|` - Instantly hard-cuts to a new scene.
+* `!transition|SceneName|TransitionType|duration |+|` - Fades/Swipes to a new scene.
 
-**`!pos`, `!scale`, `!rot` (Instant Transformations)**
-Instantly snaps a source to a value without animation.
+### 6. Visual Effects (VFX) Library
+Instant macro animations for targeted sources.
+* `!shake|intensity|duration |+|`
+* `!camera_shake|intensity|duration |+|`
+* `!glitch|intensity|duration |+|`
+* `!rainbow|speed|duration |+|`
+* `!breathing|speed|duration |+|`
+* `!dvd|speed|duration |+|`
+* `!sway|speed|duration |+|`
 
-```text
-!pos|x:960, y:540 |+|
-!scale|x:1.5, y:1.5 |+|
+### 7. Utility
+* `!log|message |+|` - Prints a message/variable to the OBS script log.
 
-```
+---
+Great catch—those are essential for building responsive layouts and time-based logic. The `screen` variable allows you to calculate positions relative to the canvas size, while `tick` is perfect for creating custom oscillations or timing events.
 
-**Advanced Animations:**
-
-* `!path | cp_x:val, cp_y:val | target_x:val, target_y:val | duration | easing` (Bezier Curves)
-* `!spiral | center_x, center_y | start_radius | rotations | duration | easing`
-* `!fade | target_opacity | duration | easing`
-* `!pin | parent_source | offsets` (Glues one source to another)
+Here is the updated **Predefined Variables & Functions** section to include those additions:
 
 ---
 
-## 🧠 Logic & Control Flow
+### **7. Predefined Global Variables**
 
-Control the flow of your script using loops, jumps, and conditional subroutines.
+These variables are updated every frame by the engine and can be used in any math expression or command.
 
-**Labels & Jumps (Loops)**
-
-```text
-!label|MyLoop |+|
-    !move|y:++10|1s|sine_inout |+|
-    !then|move|y:--10|1s|sine_inout |+|
-    !jump|MyLoop |+|
-
-```
-
-**If Statements (`!if | val1 | operator | val2 | TargetLabel | Mode`)**
-
-```text
--- Standard Jump (Leaves the current loop permanently)
-!if|health|<=|0|DeathScreen |+|
-
--- Conditional Subroutine (Requires 'CALL' flag. Will return to this spot!)
-!if|score|==|100|PlayCheer|CALL |+| 
-
-```
-
-**`!run{ ... }` (Background Threads)**
-Spawns an isolated, asynchronous background thread. Perfect for particle spawners or overlapping animations.
-
-```text
-!run{
-    !var|particle|@clone() |+|
-    !source|particle |+|
-    !move|y:1080|2s |+|
-    !delete_source |+|
-}|+|
-
-```
-
-**`!wait | duration`**
-Pauses the current thread.
-
-```text
-!wait|0.5s |+|
-
-```
+* **`screen.width` / `screen.height**`: Returns the current base resolution of your OBS canvas.
+* **`tick`**: Delta Time. Use this to ensure physics-based calculations remain consistent regardless of framerate.
 
 ---
 
-## ⚡ Event Listeners (Watchers)
+## ⚡ Predefined Functions (`@`)
+Dynamic keywords used inside arguments to fetch real-time data or perform instant engine actions. Standard math functions (e.g., `math.random`) are completely supported.
 
-Never use infinite loops to check variables! Use CPU-friendly event listeners.
-
-**`!on_change | variable | [operator] | [value] | LabelName`**
-Wakes up and spawns a thread *only* when a variable changes.
-
-```text
-!on_change|health|<=|0|GameOver |+|
-!on_change|score|UpdateScoreUI |+|
-
-```
-
-**`!onpress | Hotkey_Name | LabelName`**
-Registers an OBS Hotkey. When pressed, safely spawns a background thread.
-
-```text
-!onpress|Shoot_Key|FireBullet |+|
-
-```
-
-**`!on_collision | source_1 | source_2 | LabelName`**
-Fires a background thread when two source bounding boxes overlap.
-
-```text
-!on_collision|player|bullet|TakeDamage |+|
-
-```
+* **`@clone(auto_delete_bool)`**: Creates an exact duplicate of the currently targeted source.
+* **`@source(Name)`**: Returns the internal reference of a source.
+* **`@delete_source()`**: Instantly deletes the targeted source.
+* **`@dist(x1, y1, x2, y2)`**: Calculates the distance between two points.
+* **`@mouse()`**: Returns the current mouse coordinates.
+* **`@alert(msg)`**: Triggers a system/OBS alert popup.
 
 ---
 
-## 🎨 Styling & FX Library
-
-Modify OBS source filters and text properties dynamically.
-
-| Command | Example | Description |
-| --- | --- | --- |
-| `!text` | `!text|Score: score|+ | ` |
-| `!style.color` | `!style.color|255|0|0|+ | ` |
-| `!shake` | `!shake|15|0.5s|+ | ` |
-| `!glitch` | `!glitch|20|1s|+ | ` |
-| `!rainbow` | `!rainbow|0.01|0s|+ | ` |
-| `!breathing` | `!breathing|0.05|0s|+ | ` |
-
----
-
-## 🚀 Quick Example: Particle Spawner
-
-Here is a complete script demonstrating threading, scoping, and cleanup.
+## 🎮 Example: The Object Pool
+Here is an example of creating parallel asteroids that read their own local frozen IDs while listening to a global game state.
 
 ```text
-!var|base_particle|source(Asteroid) |+|
-!source|base_particle |+| !hide |+|
+!gvar|is_playing|1 |+|
+!array.clear|asteroid_pool |+|
 
-!label|ParticleSpawner |+|
+!var|spawn_count|5 |+|
+!label|GeneratePool |+|
+    !var|new_rock|@clone(true) |+|
+    
     !run{
-        -- 1. Setup Clone
-        !source|base_particle |+|
-        !var|clone_id|@clone(true) |+|
-        !source|clone_id |+|
+        !source|new_rock |+| 
+        !move|y:1200|5s|linear |+|
         
-        -- 2. Randomize Start Position
-        !pos|x:(math.random(0, 1920 - width)), y:-200 |+|
-        !show |+|
-        
-        -- 3. Dynamic Math Trajectories
-        !var|fall_time|(math.random(2, 6)) |+|
-        !var|spin|(math.random(-360, 360)) |+|
-        
-        -- 4. Animate and Clean up
-        !move|y:1200, rot:spin|fall_time |+|
-        !delete_source |+|
+        -- Threads can safely access their frozen 'new_rock' variable 
+        -- while simultaneously reading the live global 'is_playing' state!
+        !if|is_playing|==|0|StopRock |+|
     }|+|
     
-    !wait|0.5s |+|
-    !jump|ParticleSpawner |+|
-
-```
-
----
-
-### Installation
-
-1. Add `4IM3-SCRIPT.lua` to your OBS Scripts folder (`Tools -> Scripts`).
-2. Select your text file or type your code into the provided Script UI.
-3. Click **Execute** and watch your canvas come alive!
+    !array.push|asteroid_pool|new_rock |+|
+    !var|spawn_count|--1 |+|
+    !if|spawn_count|>|0|GeneratePool |+|
