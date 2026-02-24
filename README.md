@@ -32,7 +32,8 @@ The engine uses a strict, highly parsable command syntax:
 Any command requiring a duration accepts highly readable time formats. The engine standardizes them automatically:
 * `500ms` (Milliseconds)
 * `2.5s` (Seconds)
-* `1m` (Minutes)
+* `1mi` (Minutes)
+* `0.5hr` (Hours)
 
 ### Easing Library
 For animations like `!move` or `!fade`, the engine supports the following curves:
@@ -66,12 +67,12 @@ For animations like `!move` or `!fade`, the engine supports the following curves
 
 ### 3. Events & Listeners
 * `!onpress|HotkeyName|Label |+|` - Listens for a specific keyboard shortcut.
-* `!on_change|VariableName|Label |+|` - Triggers a label when a variable's value changes.
-* `!on_collision|SourceA|SourceB|Label |+|` - Triggers a label when two sources overlap.
+* `!change|VariableName|Label |+|` - Triggers a label when a variable's value changes.
+* `!collision|SourceA|SourceB|Label |+|` - Triggers a label when two sources overlap.
 
 ### 4. Source Control & Transformations
 * `!source|SourceName |+|` - Targets an OBS source for subsequent commands.
-* `!delete_source|SourceName |+|` - Completely deletes a source from OBS.
+* `!delete|SourceName |+|` - Completely deletes a source from OBS.
 * `!move|x:val, y:val|duration|easing |+|` - Smoothly translates a source.
 * `!fade|opacity_level|duration|easing |+|` - Transitions opacity (0 to 100).
 * `!pin|parent_source|offsets |+|` - Glues a source to another (e.g., `!pin|Hero|x:0, y:20`).
@@ -121,7 +122,6 @@ Dynamic keywords used inside arguments to fetch real-time data or perform instan
 
 * **`@clone(auto_delete_bool)`**: Creates an exact duplicate of the currently targeted source.
 * **`@source(Name)`**: Returns the internal reference of a source.
-* **`@delete_source()`**: Instantly deletes the targeted source.
 * **`@dist(x1, y1, x2, y2)`**: Calculates the distance between two points.
 * **`@mouse()`**: Returns the current mouse coordinates.
 * **`@alert(msg)`**: Triggers a system/OBS alert popup.
