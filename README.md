@@ -1,153 +1,243 @@
 # 4IM3 Scripting Engine for OBS Studio (v2.0.0)
 
-A highly advanced, multithreaded Lua scripting engine built directly for OBS Studio. 4IM3 transforms OBS from a simple broadcasting tool into a dynamic, logic-driven environment capable of running games, complex cinematic automations, and interactive stream widgets.
+This engine allows you to write multithreaded, interactive scripts directly inside OBS Studio. This document covers the exact syntax, commands, and variables you need to animate sources, build logic, and control OBS.
 
-## ✨ Key Features
-* **Multithreaded Execution:** Spawn parallel background tasks that execute simultaneously without locking up the OBS UI.
-* **"Read-Through" Memory Model:** True lexical scoping. Background threads capture local loop variables while maintaining live access to global states.
-* **Delta-Time Physics:** Framerate-independent animations guarantee smooth scaling, moving, and fading regardless of stream FPS.
-* **Total OBS Dominion:** Manipulate Scene Items, Filters, Audio Sources, Media Timelines, and Scene Transitions directly from your scripts.
-* **Built-in VFX Library:** Instantly trigger complex visual effects like glitches, screen shakes, and rainbow cycles with a single command.
+## 1. Syntax Rules
 
----
+Every line of code you write must follow these strict formatting rules:
 
-## 🚀 Installation
-1. Download `4IM3-SCRIPT-2.0.0.lua`.
-2. Open OBS Studio.
-3. Navigate to **Tools > Scripts**.
-4. Click the **+** icon and add the Lua file.
-5. Use the provided script text box to write your logic, or link to an external text file.
+* **Start and End:** Every command starts with `!` and **must** end with `|+|`.
+* **Arguments:** Separated by the pipe symbol `|`.
+* **Dynamic Math:** You can wrap arguments in `( )` to evaluate live math or read variables (e.g., `!move|x:(screen.width / 2)|1s|+|\`).
+* **Time Formats:** Durations accept `ms` (milliseconds), `s` (seconds), `mi` (minutes), and `hr` (hours).
+* **Relative Values:** Use `++` or `--` to add or subtract from a current value (e.g., `!move|x:++50|1s|+|\`).
 
----
+### The Interrupt Guard `[[ ]]`
 
-## 📖 Syntax Overview
-The engine uses a strict, highly parsable command syntax:
-`!command_name | argument_1 | argument_2 |+|`
+You can instantly cancel any time-consuming command (like `!wait` or `!move`) if a variable changes.
 
-* Every command starts with `!`
-* Arguments are separated by `|`
-* Every line **must** end with the execution terminator `|+|`
-
-### The Universal Time Parser
-Any command requiring a duration accepts highly readable time formats. The engine standardizes them automatically:
-* `500ms` (Milliseconds)
-* `2.5s` (Seconds)
-* `1mi` (Minutes)
-* `0.5hr` (Hours)
-
-### Easing Library
-For animations like `!move` or `!fade`, the engine supports the following curves:
-`linear`, `quad_in`, `quad_out`, `quad_inout`, `sine_inout`, `back_out`, `elastic_out`, `bounce_out`
+* **Format:** `[[Variables_to_Watch]][Optional_Jump_Label] !command |+|`
+* **Example:** `[[isHit]][Flinch] !move|x:500|5s |+|`
+*(This moves the source over 5 seconds. If the variable `isHit` changes at any point during those 5 seconds, the movement cancels instantly and the script jumps to the `Flinch` label).*
 
 ---
 
-## 🛠️ Command Reference
+## 2. Core Commands
 
-### 1. Variables & Logic
-* `!var|name|value |+|` - Creates/updates a local variable. Supports relative math (`++1`, `--1`).
-* `!gvar|name|value |+|` - Creates/updates a global game-state variable.
-* `!if|val1|operator|val2|TargetLabel |+|` - Conditional logic. Jumps to `TargetLabel` if true.
-* `!label|Name |+|` - Defines a jump point in the script.
-* `!jump|Name |+|` - Instantly moves execution to a label.
-* `!call|Name |+|` - Executes a label and returns.
-* `!return |+|` - Ends the current execution block.
-* `!include|filepath |+|` - Imports and executes an external script file.
+### Flow Control & Logic
 
-### 2. Arrays & Multithreading
-* `!array.push|array_name|value |+|` - Adds an item to a specific array.
-* `!array.pop|array_name|save_var |+|` - Removes the last item and optionally saves it.
-* `!array.remove|array_name|value |+|` - Finds and deletes a specific value from the array.
-* `!array.clear|array_name |+|` - Empties the array.
-* `!foreach|array_name|item_var|LabelName |+|` - Iterates through an array, spawning a parallel thread for each item.
-* `!run{ ... }|+|` - Spawns a parallel background thread with a frozen snapshot of local variables.
-* `!stop |+|` - Kills all background tasks immediately.
-* `!wait|duration |+|` - Pauses the current thread for the specified time.
-* `!loop |+|` - Restarts the current execution block from the beginning.
-* `!then |+|` - Chains execution (waits for previous async tasks to finish).
+* **`!label | Name |+|`** - Creates a marker in your script to jump to.
+* **`!jump | Name |+|`** - Instantly moves execution to a label.
+* **`!wait | duration |+|`** - Pauses the script (e.g., `!wait|1.5s |+|`).
+* **`!call | Name | Optional_Args |+|`** - Jumps to a label, runs it, and then returns to where it left off.
+* You can pass temporary local variables: `!call|MyLabel|x:10, y:20 |+|`.
+* **`!return |+|`** - Returns from a `!call`. If used outside a call, it ends the current thread.
+* **`!if | val1 | operator | val2 | Label | Mode |+|`** - Compares two values (`==`, `!=`, `>`, `<`, `>=`, `<=`).
+* If true, it jumps to the Label. If you set `Mode` to `ret`, it performs a `!call` instead of a `!jump`.
+* **`!loop |+|`** - Completely resets the script and restarts from the very top.
+* **`!then | cmd | args |+|`** - Executes a single command inline.
 
-### 3. Events & Listeners
-* `!onpress|HotkeyName|Label |+|` - Listens for a specific keyboard shortcut.
-* `!change|VariableName|Label |+|` - Triggers a label when a variable's value changes.
-* `!collision|SourceA|SourceB|Label |+|` - Triggers a label when two sources overlap.
+### Variables & Memory
 
-### 4. Source Control & Transformations
-* `!source|SourceName |+|` - Targets an OBS source for subsequent commands.
-* `!delete|SourceName |+|` - Completely deletes a source from OBS.
-* `!move|x:val, y:val|duration|easing |+|` - Smoothly translates a source.
-* `!fade|opacity_level|duration|easing |+|` - Transitions opacity (0 to 100).
-* `!pin|parent_source|offsets |+|` - Glues a source to another (e.g., `!pin|Hero|x:0, y:20`).
-* `!attach|target_source|label_name |+|` - Binds a source to a specific script label.
-* `!path|control_x,control_y|target_x,target_y|duration|easing |+|` - Moves a source along a set of coordinates.
-* `!spiral|x,y|radius|rotations|duration|easing |+|` - Moves a source in a spiral pattern.
+* **`!var | name | value |+|`** - Sets a local variable.
+* **`!gvar | name | value |+|`** - Sets a global variable.
+* **`!array.push | array_name | value |+|`** - Adds an item to a list.
+* **`!array.pop | array_name | save_var |+|`** - Removes the last item and saves it to a variable.
+* **`!array.remove | array_name | value |+|`** - Finds and removes a specific value.
+* **`!array.clear | array_name |+|`** - Empties the list.
 
-### 5. Advanced OBS Control (Media, Audio, Scenes, Filters)
-* `!filter|Target|FilterName|Prop|Val|duration |+|` - Instantly snaps or smoothly tweens an OBS filter property.
-* `!media|SourceName|play/pause/stop/seek |+|` - Controls video timelines.
-* `!media_time|SourceName|save_var |+|` - Reads current video playback time into a local variable.
-* `!sound|SourceName|action_or_volume|val|duration |+|` - Triggers audio or fades volume.
-* `!switch|SceneName |+|` - Instantly hard-cuts to a new scene.
-* `!transition|SceneName|TransitionType|duration |+|` - Fades/Swipes to a new scene.
+### Background Threads & Scope
 
-### 6. Visual Effects (VFX) Library
-Instant macro animations for targeted sources.
-* `!shake|intensity|duration |+|`
-* `!camera_shake|intensity|duration |+|`
-* `!glitch|intensity|duration |+|`
-* `!rainbow|speed|duration |+|`
-* `!breathing|speed|duration |+|`
-* `!dvd|speed|duration |+|`
-* `!sway|speed|duration |+|`
+* **`!source | Target1 | Target2... |+|`** - Selects one or multiple OBS sources to manipulate. Leave blank (`!source |+|`) to reset.
+* **`!run { code } |+|`** or **`!run | Label |+|`** - Spawns a background thread that runs simultaneously.
+* **`!foreach | array_name | item_var | Label |+|`** - Loops through an array, spawning a parallel thread for each item.
+* **`!stop | TargetName |+|`** - Kills all background threads attached to a specific source. Use `!stop|all` to kill everything.
 
-### 7. Utility
-* `!log|message |+|` - Prints a message/variable to the OBS script log.
+### Triggers & Events
 
----
-Great catch—those are essential for building responsive layouts and time-based logic. The `screen` variable allows you to calculate positions relative to the canvas size, while `tick` is perfect for creating custom oscillations or timing events.
-
-Here is the updated **Predefined Variables & Functions** section to include those additions:
+* **`!onpress | HotkeyName | PressLabel | ReleaseLabel |+|`** - Triggers a label when a keyboard key is pressed, and another when released.
+* **`!change | VarName | Operator | Value | Label |+|`** - Triggers a label automatically when a variable hits a specific value. Omit the operator and value to trigger on *any* change.
+* **`!collision | Source1 | Source2 | Label |+|`** - Triggers a label automatically when two sources touch on screen.
+* **`!attach | SourceName | Label |+|`** - Instantly launches a thread for a specific source.
 
 ---
 
-### **7. Predefined Global Variables**
+## 3. Animation & Transformations
 
-These variables are updated every frame by the engine and can be used in any math expression or command.
+* **`!easing | EasingName |+|`** - Sets the default smoothing curve (e.g., `linear`, `quad_out`, `bounce_out`).
+* **`!move | properties | duration | easing |+|`** - Moves, scales, or rotates a source.
+* *Format:* `x:val, y:val, rot:val, scale.x:val, scale.y:val`.
+* *Example:* `!move|x:500, scale.x:2|1s|quad_out |+|`.
 
-* **`screen.width` / `screen.height**`: Returns the current base resolution of your OBS canvas.
-* **`tick`**: Delta Time. Use this to ensure physics-based calculations remain consistent regardless of framerate.
 
----
-
-## ⚡ Predefined Functions (`@`)
-Dynamic keywords used inside arguments to fetch real-time data or perform instant engine actions. Standard math functions (e.g., `math.random`) are completely supported.
-
-* **`@clone(auto_delete_bool)`**: Creates an exact duplicate of the currently targeted source.
-* **`@source(Name)`**: Returns the internal reference of a source.
-* **`@dist(x1, y1, x2, y2)`**: Calculates the distance between two points.
-* **`@mouse()`**: Returns the current mouse coordinates.
-* **`@alert(msg)`**: Triggers a system/OBS alert popup.
+* **`!path | control_x,control_y | target_x,target_y | duration | easing |+|`** - Moves a source along a curved trajectory. Argument 1 sets the curve pull (control point), Argument 2 sets the final destination.
+* **`!spiral | center_x,center_y | start_radius | rotations | duration | easing |+|`** - Spirals a source inward.
+* **`!fade | target_opacity | duration | easing |+|`** - Adjusts visibility (0.0 to 1.0).
+* **`!pin | ParentSource | offset_x,offset_y |+|`** - Locks the current source to a parent source's location. Use `!pin|none` to detach.
+* **`!delete |+|`** - Deletes the current source from the OBS scene.
 
 ---
 
-## 🎮 Example: The Object Pool
-Here is an example of creating parallel asteroids that read their own local frozen IDs while listening to a global game state.
+## 4. OBS Integration
+
+* **`!filter | SourceName | FilterName | PropertyName | TargetValue | Duration |+|`** - Smoothly animates an OBS filter setting (like Blur Size or Color). Omit duration to snap instantly.
+* **`!media | SourceName | Action | Value |+|`** - Controls video playback.
+* *Actions:* `play`, `pause`, `stop`, `restart`, `seek`.
+* *Example:* `!media|MyVideo|seek|10s |+|`.
+
+
+* **`!media_time | SourceName | SaveVariable |+|`** - Saves the video's current playback time to a variable.
+* **`!sound | SourceName | Action | TargetValue | Duration |+|`** - Audio control.
+* *Actions:* `play`, `pause`, `stop`, `volume`.
+* *Example (Fade audio):* `!sound|BGM|volume|0.5|2s |+|`.
+
+
+* **`!switch | SceneName |+|`** - Instantly cuts to a new OBS scene.
+* **`!transition | SceneName | TransitionType | Duration |+|`** - Changes scenes using an OBS transition (e.g., `Fade`).
+* **`!log | Message |+|`** - Prints text to the OBS Script Log.
+
+---
+
+## 5. Visual Effects (VFX)
+
+Quick, pre-built animations.
+
+* **`!shake | intensity | duration |+|`** - Jitters the source.
+* **`!camera_shake | intensity | duration |+|`** - Jitters the entire scene.
+* **`!glitch | intensity | duration |+|`** - Digital tearing effect.
+* **`!rainbow | speed | duration |+|`** - Color cycles (requires an attached Color Filter).
+* **`!breathing | speed | duration |+|`** - Gently pulses scale and opacity.
+* **`!sway | speed | duration |+|`** - Rocks back and forth (rotation).
+* **`!dvd | speed | duration |+|`** - Bounces the source around the screen boundaries.
+
+---
+
+## 6. Predefined Variables & Functions
+
+You can use these directly inside math brackets `( )` anywhere in your script.
+
+### Live Variables
+
+* **`screen.width`**: Width of the OBS canvas.
+* **`screen.height`**: Height of the OBS canvas.
+* **`tick`**: The time passed since the last frame (useful for custom physics).
+* **`pi` / `huge**`: Math constants ($\pi$ and $\infty$).
+
+### @ Functions
+
+* **`@mouse()`**: Returns the cursor position `{x, y}`.
+* **`@dist(x1, y1, x2, y2)`**: Calculates distance between points.
+* **`@source(Name)` / `!var|my_source|source(name)`**: Gets a source reference.
+* **`@clone(auto_delete_bool)`**: Duplicates the targeted source.
+* **`@delete()**`: Deletes a source.
+* **`@alert(msg)`**: Logs a warning.
+* **Standard Math**: `@sin()`, `@cos()`, `@abs()`, `@floor()`, `@ceil()` are all supported natively.
+---
+## Examples
+
+### 1. The "Ping-Pong" Patrol Loop
+
+This creates a simple, infinite back-and-forth movement loop. 
+Perfect for floating enemies, clouds, or moving background elements.
 
 ```text
-!gvar|is_playing|1 |+|
-!array.clear|asteroid_pool |+|
+!source|EnemyShip |+|
 
-!var|spawn_count|5 |+|
-!label|GeneratePool |+|
-    !var|new_rock|@clone(true) |+|
+!label|StartPatrol |+|
+    -- Move right by 300 pixels smoothly over 2 seconds
+    !move|x:++300|2s|sine_inout |+|
+    !wait|2s |+|
     
-    !run{
-        !source|new_rock |+| 
-        !move|y:1200|5s|linear |+|
-        
-        -- Threads can safely access their frozen 'new_rock' variable 
-        -- while simultaneously reading the live global 'is_playing' state!
-        !if|is_playing|==|0|StopRock |+|
-    }|+|
+    -- Move left by 300 pixels
+    !move|x:--300|2s|sine_inout |+|
+    !wait|2s |+|
     
-    !array.push|asteroid_pool|new_rock |+|
-    !var|spawn_count|--1 |+|
-    !if|spawn_count|>|0|GeneratePool |+|
+    -- Loop forever
+    !jump|StartPatrol |+|
+
+```
+
+### 2. The Dynamic Health Bar
+
+This snippet shows how to use math inside arguments `( )` to smoothly shrink a UI element based on a variable.
+
+```text
+!source|HealthBarFill |+|
+!gvar|player_health|100 |+|
+
+-- Call this label whenever the player takes damage
+!label|TakeDamage |+|
+    -- Subtract 10 from the current health
+    !gvar|player_health|--10 |+|
+    
+    -- Dynamically calculate the scale (e.g., 80 health = 0.8 scale)
+    !move|scale.x:(player_health / 100)|300ms|quad_out |+|
+    
+    -- Briefly flash the health bar red using a color filter
+    !filter|HealthBarFill|ColorCorrection|color|0xff0000|100ms |+|
+    !filter|HealthBarFill|ColorCorrection|color|0xffffff|200ms |+|
+    
+    !return |+|
+
+```
+
+### 3. The "Fire & Forget" VFX Thread
+
+Want a magical crystal to pulse and hover in the background while your main script does other things? 
+Use `!run` to spin up a parallel thread and drop a VFX macro inside.
+
+```text
+!source|MagicCrystal |+|
+
+-- Spawns a background thread that runs independently
+!run{
+    -- The breathing macro scales and pulses opacity automatically
+    -- The '0' duration means it loops infinitely
+    !breathing|0.05|0 |+|
+}|+|
+
+-- The main script immediately continues down here!
+!log|Crystal animation started! |+|
+
+```
+
+### 4. The "Reactive" Enemy (Interrupt Guards)
+
+The enemy will patrol normally, but if the `isHit` variable changes, it will instantly cancel its movement and play a flinch animation.
+
+```text
+!source|BossMonster |+|
+!gvar|isHit|0 |+|
+
+!label|Patrol |+|
+    -- Move for 5 seconds. If 'isHit' changes, abort instantly and jump to [Flinch]!
+    [[isHit]][Flinch] !move|x:++500|5s|linear |+|
+    [[isHit]][Flinch] !wait|5s |+|
+    
+    [[isHit]][Flinch] !move|x:--500|5s|linear |+|
+    [[isHit]][Flinch] !wait|5s |+|
+    
+    !jump|Patrol |+|
+
+!label|Flinch |+|
+    !shake|20|300ms |+|
+    !gvar|isHit|0 |+|  -- Reset the hit state
+    !jump|Patrol |+|   -- Go back to patrolling
+
+```
+
+### 5. Follow the Mouse
+
+A tiny script that mathematically glues a source to your live cursor coordinates using the `@mouse()` function.
+
+```text
+!source|CustomCursor |+|
+
+!label|FollowLoop |+|
+    -- Fetch the mouse X and Y dynamically every frame
+    !move|x:(@mouse().x), y:(@mouse().y)|16ms|linear |+|
+    
+    !wait|16ms |+|
+    !jump|FollowLoop |+|
+
+```
