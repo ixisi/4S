@@ -1,0 +1,167 @@
+-- [[ PING PONG A.I WITH (4S) ]]
+-- variables
+!gvar|player1_score|0|+|
+!gvar|player2_score|0|+|
+!gvar|moving|0|+|
+!gvar|velX|-15|+|
+!gvar|velY|10|+|
+
+
+-- collision & hotkeys
+
+!collision|Ball|Paddle1|BounceRight|+|
+!collision|Ball|Paddle2|BounceLeft|+|
+!onpress|[Move paddle up]|player_move_up|player_move_end|+|
+!onpress|[Move paddle down]|player_move_down|player_move_end|+|
+!onpress|[Press to start]|main|+|
+
+-- player movement
+-skip-
+    !label|player_move_up|+|
+        !gvar|moving|1|+|
+        !label|move_up|+|
+            !source|Paddle1|+|
+            !wait|16ms|+|
+            !move|y:--12|16ms|linear|+|
+            !if|pos.y|<=|0|reset_player_paddle_up|+|
+            !if|moving|==|1|move_up|+|
+        !return|+|
+    !label|player_move_down|+|
+        !gvar|moving|1|+|
+        !label|move_down|+|
+            !source|Paddle1|+|
+            !wait|16ms|+|
+            !move|y:++12|16ms|linear|+|
+            !if|pos.y|>=|(screen.height - height)|reset_player_paddle_down|+|
+            !if|moving|==|1|move_down|+|
+        !return|+|
+    !label|reset_player_paddle_up|+|
+        !source|Paddle1|+|
+        !pos|y:0|+|
+        !return|+|
+    !label|reset_player_paddle_down|+|
+        !source|Paddle1|+|
+        !pos|y:(screen.height - height)|+|
+        !return|+|
+    !label|player_move_end|+|
+        !gvar|moving|0|+|
+        !return|+|
+-end-
+
+
+-- ball collision
+-skip-
+    !label|BounceLeft|+|
+        !source|Paddle2|+|
+        !var|pY|pos.y|+|
+        !var|pH|height|+|
+        !source|Ball|+|
+        !var|bY|pos.y|+|
+        !var|normalized|((bY - (pY + (pH / 2))) / (pH / 2))|+|
+        !gvar|velY|(normalized * 15)|+|
+        !gvar|velX|(-@math.abs(velX) * 1.05)|+|
+        !return|+|
+    !label|BounceRight|+|
+        !source|Paddle1|+|
+        !var|pY|pos.y|+|
+        !var|pH|height|+|
+        !source|Ball|+|
+        !var|bY|pos.y|+|
+        !var|normalized|((bY - (pY + (pH / 2))) / (pH / 2))|+|
+        !gvar|velY|(normalized * 15)|+|
+        !gvar|velX|(@math.abs(velX) * 1.05)|+|
+        !return|+|
+    !label|BallTop|+|
+        !gvar|velY|(@math.abs(velY))|+|
+        !jump|ball_move|+|
+    !label|BallBottom|+|
+        !gvar|velY|(-@math.abs(velY))|+|
+        !jump|ball_move|+|
+-end-
+
+
+-- score update
+
+-skip-
+    !label|player1_score|+|
+        !gvar|player1_score|++1|+|
+        !source|Score|+|
+        !text|player1_score - player2_score|+|
+        !call|reset_everything|+|
+        !jump|ball_move|+|
+    !label|player2_score|+|
+        !gvar|player2_score|++1|+|
+        !source|Score|+|
+        !text|player1_score - player2_score|+|
+        !call|reset_everything|+|
+        !jump|ball_move|+|
+-end-
+
+
+-- player2 movement
+
+-skip-
+    !label|player2|+|
+        !source|Paddle2|+|
+        !var|posY|pos.y|+|
+        !source|Ball|+|
+        !var|ballY|pos.y|+|
+        !if|ballY|<|(posY + 80)|player2_move_up|+|
+        !if|ballY|>|(posY + 120)|player2_move_down|+|
+        !jump|player2_wait|+|
+    !label|player2_move_up|+|
+        !source|Paddle2|+|
+        !if|pos.y|<=|0|player2_top|+|
+        !move|y:--12|16ms|linear|+|
+        !jump|player2_wait|+|
+    !label|player2_move_down|+|
+        !source|Paddle2|+|
+        !if|pos.y|>=|(screen.height - height)|player2_bottom|+|
+        !move|y:++12|16ms|linear|+|
+        !jump|player2_wait|+|
+    !label|player2_top|+|
+        !source|Paddle2|+|
+        !pos|y:0|+|
+        !jump|player2_wait|+|
+    !label|player2_bottom|+|
+        !source|Paddle2|+|
+        !pos|y:(screen.height - height)|+|
+        !jump|player2_wait|+|
+    !label|player2_wait|+|
+        !wait|16ms|+|
+        !jump|player2|+|
+    
+-end-
+
+-- main game loop
+
+-skip-
+    !label|main|+|
+        !run|player2|+|
+        -skip-
+            !label|reset_everything|+|
+                !gvar|velX|-15|+|
+                !gvar|velY|10|+|
+                !gvar|moving|0|+|
+                !source|Paddle1|Paddle2|+|
+                !pos|y:((screen.height - height) / 2)|+|
+                !source|Ball|+|
+                !pos|x:((screen.width - width) / 2),y:((screen.height - height ) / 2)|+|
+                !source|Score|+|
+                !text|player1_score - player2_score|+|
+                !return|+|
+        -end-
+        !call|reset_everything|+|
+
+        !label|ball_move|+|
+            !source|Ball|+|
+            !wait|16ms|+|
+            !move|x:++(velX),y:++(velY)|30ms|linear|+|
+            !if|pos.y|<=|0|BallTop|+|
+            !if|pos.y|>=|(screen.height - height)|BallBottom|+|
+            !if|pos.x|>=|(screen.width)|player1_score|+|
+            !if|pos.x|<=|-(width)|player2_score|+|
+            !jump|ball_move|+|
+        !return|+|
+-end-
+!call|reset_everything|+|
