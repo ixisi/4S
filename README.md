@@ -11,12 +11,14 @@ Every line of code you write must follow these strict formatting rules:
 * **Dynamic Math:** You can wrap arguments in `( )` to evaluate live math or read variables (e.g., `!move|x:(screen.width / 2)|1s|+|\`).
 * **Time Formats:** Durations accept `ms` (milliseconds), `s` (seconds), `mi` (minutes), and `hr` (hours).
 * **Relative Values:** Use `++` or `--` to add or subtract from a current value (e.g., `!move|x:++50|1s|+|\`).
-
+* **`-skip-` and `-end-`:** Creates an isolated block of code that the main execution thread will skip over initially. This is mandatory for wrapping sub-routines, functions, or background threads.
+* **`!include|filepath|+|`:** Imports and injects an external `.txt` script file directly into the current code block.
+* **`<<material>>`:** Physics Material Guard. Defines the physical state of the active source for the engine's built-in collision solver (e.g., `<<solid>> !source|SourceNameOrVariableSource` creates impenetrable walls that resolve overlap automatically).
 ### The Interrupt Guard `[[ ]]`
 
 You can instantly cancel any time-consuming command (like `!wait` or `!move`) if a variable changes.
 
-* **Format:** `[[Variables_to_Watch]][Optional_Jump_Label] !command |+|`
+* **Format:** `[[Variables_to_Watch]][Optional_Jump_Label] !cmd |+|` or `[[Variables_to_Watch]] !cmd |+|`
 * **Example:** `[[isHit]][Flinch] !move|x:500|5s |+|`
 *(This moves the source over 5 seconds. If the variable `isHit` changes at any point during those 5 seconds, the movement cancels instantly and the script jumps to the `Flinch` label).*
 
@@ -28,13 +30,13 @@ You can instantly cancel any time-consuming command (like `!wait` or `!move`) if
 
 * **`!label | Name |+|`** - Creates a marker in your script to jump to.
 * **`!jump | Name |+|`** - Instantly moves execution to a label.
-* **`!wait | duration |+|`** - Pauses the script (e.g., `!wait|1.5s |+|`).
+* **`!wait|time`**: Pauses the current thread. Accepts formats like `16ms`, `1s`, `1mi`, `1hr`.
 * **`!call | Name | Optional_Args |+|`** - Jumps to a label, runs it, and then returns to where it left off.
 * You can pass temporary local variables: `!call|MyLabel|x:10, y:20 |+|`.
 * **`!return |+|`** - Returns from a `!call`. If used outside a call, it ends the current thread.
 * **`!if | val1 | operator | val2 | Label | Mode |+|`** - Compares two values (`==`, `!=`, `>`, `<`, `>=`, `<=`).
 * If true, it jumps to the Label. If you set `Mode` to `ret`, it performs a `!call` instead of a `!jump`.
-* **`!loop |+|`** - Completely resets the script and restarts from the very top.
+* **`!loop |+|`** - Completely resets the script and restarts from the very top _(not recommanded for large codebases)_.
 * **`!then | cmd | args |+|`** - Executes a single command inline.
 
 ### Variables & Memory
@@ -48,23 +50,25 @@ You can instantly cancel any time-consuming command (like `!wait` or `!move`) if
 
 ### Background Threads & Scope
 
-* **`!source | Target1 | Target2... |+|`** - Selects one or multiple OBS sources to manipulate. Leave blank (`!source |+|`) to reset.
+* **`!source|name1|name2...`**: Sets the Active Source scope. All subsequent commands (like `!move`) will apply to these sources until `!source` is called empty to clear the scope.
 * **`!run { code } |+|`** or **`!run | Label |+|`** - Spawns a background thread that runs simultaneously.
 * **`!foreach | array_name | item_var | Label |+|`** - Loops through an array, spawning a parallel thread for each item.
+* **`!despawn|duration_ms`**: Schedules the active source to automatically delete itself after a set time.
 * **`!stop | TargetName |+|`** - Kills all background threads attached to a specific source. Use `!stop|all` to kill everything.
-
+* **`!fetch|url|save_var`**: Asynchronously gets JSON data from a web URL and parses it into a native data.
 ### Triggers & Events
 
-* **`!onpress | HotkeyName | PressLabel | ReleaseLabel |+|`** - Triggers a label when a keyboard key is pressed, and another when released.
+* **`!onpress | TitleName(Shown to the user) | PressLabel | ReleaseLabel(Optional) |+|`** - Triggers a label when a keyboard key is pressed, and another when released.
 * **`!change | VarName | Operator | Value | Label |+|`** - Triggers a label automatically when a variable hits a specific value. Omit the operator and value to trigger on *any* change.
 * **`!collision | Source1 | Source2 | Label |+|`** - Triggers a label automatically when two sources touch on screen.
 * **`!attach | SourceName | Label |+|`** - Instantly launches a thread for a specific source.
-
+* **`!emitter|source_to_clone|max_count|interval|label`**: Automatically clones a source at a set millisecond interval.
 ---
 
 ## 3. Animation & Transformations
 
 * **`!easing | EasingName |+|`** - Sets the default smoothing curve (e.g., `linear`, `quad_out`, `bounce_out`).
+* *EasingNames:* `linear`, `quad_out`, `quad_in`, `quad_inout`, `bounce_out`, `sine_inout`, `back_out`, `elastic_out`.
 * **`!move | properties | duration | easing |+|`** - Moves, scales, or rotates a source.
 * *Format:* `x:val, y:val, rot:val, scale.x:val, scale.y:val`.
 * *Example:* `!move|x:500, scale.x:2|1s|quad_out |+|`.
@@ -95,6 +99,7 @@ You can instantly cancel any time-consuming command (like `!wait` or `!move`) if
 * **`!switch | SceneName |+|`** - Instantly cuts to a new OBS scene.
 * **`!transition | SceneName | TransitionType | Duration |+|`** - Changes scenes using an OBS transition (e.g., `Fade`).
 * **`!log | Message |+|`** - Prints text to the OBS Script Log.
+* *Example (String concatenate):* `!log|Hello, (user_name)`.
 
 ---
 
@@ -121,7 +126,8 @@ You can use these directly inside math brackets `( )` anywhere in your script.
 * **`screen.width`**: Width of the OBS canvas.
 * **`screen.height`**: Height of the OBS canvas.
 * **`tick`**: The time passed since the last frame (useful for custom physics).
-* **`pi` / `huge**`: Math constants ($\pi$ and $\infty$).
+* **`pi` / `huge**`: Math constants.
+* **Active Source Properties**: Whenever you set a `!source`, you can natively read its state in any math block: `pos.x`, `pos.y`, `width`, `height`, `rot`.
 
 ### @ Functions
 
