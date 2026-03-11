@@ -260,17 +260,38 @@ end
 
 function split(str, sep)
     local result = {}
+    local depth_paren = 0
+    local depth_brace = 0
     local start = 1
 
+    if not str then return result end
+
+    if #sep == 1 then
+        for i = 1, #str do
+            local c = str:sub(i, i)
+            if c == "(" then depth_paren = depth_paren + 1
+            elseif c == ")" then depth_paren = depth_paren - 1
+            elseif c == "{" then depth_brace = depth_brace + 1
+            elseif c == "}" then depth_brace = depth_brace - 1
+            elseif c == sep and depth_paren == 0 and depth_brace == 0 then
+                local part = str:sub(start, i - 1):match("^%s*(.-)%s*$")
+                if part ~= "" then table.insert(result, part) end
+                start = i + 1
+            end
+        end
+        local last_part = str:sub(start):match("^%s*(.-)%s*$")
+        if last_part and last_part ~= "" then table.insert(result, last_part) end
+        return result
+    end
+
+    -- Fallback for multi-char separators
     while true do
-        if not str then break end
         local first, last = string.find(str, sep, start, true)
         if not first then
             local last_part = str:sub(start):match("^%s*(.-)%s*$")
             if last_part ~= "" then table.insert(result, last_part) end
             break
         end
-
         local part = str:sub(start, first - 1):match("^%s*(.-)%s*$")
         if part ~= "" then table.insert(result, part) end
         start = last + 1
@@ -351,11 +372,11 @@ end
 ANIM_LIB["switch"] = function(src, state, args)
     local scene_name = resolve_path(src, args[1]) or args[1]
 
-    local scene_source = obs.obs_get_source_by_name(scene_name)
+    local scene_source = obslua.obs_get_source_by_name(scene_name)
     if not scene_source then return true end
 
-    obs.obs_frontend_set_current_scene(scene_source)
-    obs.obs_source_release(scene_source)
+    obslua.obs_frontend_set_current_scene(scene_source)
+    obslua.obs_source_release(scene_source)
     
     return true
 end
@@ -538,11 +559,11 @@ ANIM_LIB["media_time"] = function(src, state, args)
     local target_name = resolve_path(src, args[1]) or args[1]
     local var_name = args[2]
 
-    local source = obs.obs_get_source_by_name(target_name)
+    local source = obslua.obs_get_source_by_name(target_name)
     if not source then return true end
 
-    local time_ms = obs.obs_source_media_get_time(source)
-    obs.obs_source_release(source)
+    local time_ms = obslua.obs_source_media_get_time(source)
+    obslua.obs_source_release(source)
     if not src.active_scope then src.active_scope = {} end
     if src.active_task and src.active_task.variables then
         src.active_task.variables[var_name] = time_ms
@@ -561,18 +582,18 @@ ANIM_LIB["filter"] = function(src, state, args)
         local prop_name   = resolve_path(src, args[3]) or args[3]
         local target_val  = tonumber(resolve_path(src, args[4]) or args[4]) or 0
 
-        local source = obs.obs_get_source_by_name(target_name)
+        local source = obslua.obs_get_source_by_name(target_name)
         if source then
-            local filter = obs.obs_source_get_filter_by_name(source, filter_name)
+            local filter = obslua.obs_source_get_filter_by_name(source, filter_name)
             if filter then
-                local settings = obs.obs_source_get_settings(filter)
-                obs.obs_data_set_double(settings, prop_name, target_val)
-                obs.obs_source_update(filter, settings)
+                local settings = obslua.obs_source_get_settings(filter)
+                obslua.obs_data_set_double(settings, prop_name, target_val)
+                obslua.obs_source_update(filter, settings)
                 
-                obs.obs_data_release(settings)
-                obs.obs_source_release(filter)
+                obslua.obs_data_release(settings)
+                obslua.obs_source_release(filter)
             end
-            obs.obs_source_release(source)
+            obslua.obs_source_release(source)
         end
         return true 
     end
@@ -589,18 +610,18 @@ ANIM_LIB["filter"] = function(src, state, args)
         
         state.elapsed = 0
 
-        local source = obs.obs_get_source_by_name(state.target_name)
+        local source = obslua.obs_get_source_by_name(state.target_name)
         if source then
-            local filter = obs.obs_source_get_filter_by_name(source, state.filter_name)
+            local filter = obslua.obs_source_get_filter_by_name(source, state.filter_name)
             if filter then
-                local settings = obs.obs_source_get_settings(filter)
-                state.start_val = obs.obs_data_get_double(settings, state.prop_name)
-                obs.obs_data_release(settings)
-                obs.obs_source_release(filter)
+                local settings = obslua.obs_source_get_settings(filter)
+                state.start_val = obslua.obs_data_get_double(settings, state.prop_name)
+                obslua.obs_data_release(settings)
+                obslua.obs_source_release(filter)
             else
                 state.start_val = 0
             end
-            obs.obs_source_release(source)
+            obslua.obs_source_release(source)
         else
             state.start_val = 0
         end
@@ -613,17 +634,17 @@ ANIM_LIB["filter"] = function(src, state, args)
     
     local current_val = state.start_val + ((state.target_val - state.start_val) * progress)
 
-    local source = obs.obs_get_source_by_name(state.target_name)
+    local source = obslua.obs_get_source_by_name(state.target_name)
     if source then
-        local filter = obs.obs_source_get_filter_by_name(source, state.filter_name)
+        local filter = obslua.obs_source_get_filter_by_name(source, state.filter_name)
         if filter then
-            local settings = obs.obs_source_get_settings(filter)
-            obs.obs_data_set_double(settings, state.prop_name, current_val)
-            obs.obs_source_update(filter, settings)
-            obs.obs_data_release(settings)
-            obs.obs_source_release(filter)
+            local settings = obslua.obs_source_get_settings(filter)
+            obslua.obs_data_set_double(settings, state.prop_name, current_val)
+            obslua.obs_source_update(filter, settings)
+            obslua.obs_data_release(settings)
+            obslua.obs_source_release(filter)
         end
-        obs.obs_source_release(source)
+        obslua.obs_source_release(source)
     end
 
 
@@ -1483,7 +1504,6 @@ ANIM_LIB["sway"] = function(src, state, args)
     return false
 end
 
-
 ANIM_LIB["run"] = function(src, state, args)
     local target_label = args[1]
     local snapshot = {}
@@ -1492,17 +1512,33 @@ ANIM_LIB["run"] = function(src, state, args)
             snapshot[k] = v 
         end
     end
-    local interrupt_thread = {
-        type = "THREAD", queue = src.queue, labels = src.labels,
-        current_idx = src.labels[target_label], state = {},
-        active_source = src.scene_item, active_sources = src.active_sources,
-        variables = snapshot, call_stack = {}
-    }
-    if not src.async_tasks then src.async_tasks = {} end
-    table.insert(src.async_tasks, interrupt_thread)
+    if type(target_label) == "string" and target_label:match("^{.*}$") then
+        local inner_code = target_label:match("^{(.*)}$")
+        
+        local sub_queue, sub_labels = compile_block_text(src, inner_code)
+        
+        local interrupt_thread = {
+            type = "THREAD", queue = sub_queue, labels = sub_labels,
+            current_idx = 1, state = {},
+            active_source = src.scene_item, active_sources = src.active_sources,
+            variables = snapshot, call_stack = {}
+        }
+        if not src.async_tasks then src.async_tasks = {} end
+        table.insert(src.async_tasks, interrupt_thread)
+        return true
+    end
+    if src.labels and src.labels[target_label] then
+        local interrupt_thread = {
+            type = "THREAD", queue = src.queue, labels = src.labels,
+            current_idx = src.labels[target_label], state = {},
+            active_source = src.scene_item, active_sources = src.active_sources,
+            variables = snapshot, call_stack = {}
+        }
+        if not src.async_tasks then src.async_tasks = {} end
+        table.insert(src.async_tasks, interrupt_thread)
+    end
     return true
 end
-
 -- !stop
 ANIM_LIB["stop"] = function(src, state, args)
     local target = resolve_path(src, args[1]) or args[1]
@@ -1732,28 +1768,28 @@ end
 ANIM_LIB["sound"] = function(src, state, args)
     local target_name = resolve_path(src, args[1]) or args[1]
     local action      = resolve_path(src, args[2]) or args[2]
-    local source = obs.obs_get_source_by_name(target_name)
+    local source = obslua.obs_get_source_by_name(target_name)
     if not source then return true end
     if action == "play" then
-        obs.obs_source_media_restart(source)
-        obs.obs_source_release(source)
+        obslua.obs_source_media_restart(source)
+        obslua.obs_source_release(source)
         return true
     elseif action == "pause" then
-        obs.obs_source_media_play_pause(source, true)
-        obs.obs_source_release(source)
+        obslua.obs_source_media_play_pause(source, true)
+        obslua.obs_source_release(source)
         return true
     elseif action == "stop" then
-        obs.obs_source_media_stop(source)
-        obs.obs_source_release(source)
+        obslua.obs_source_media_stop(source)
+        obslua.obs_source_release(source)
         return true
     end
     local target_val = tonumber(resolve_path(src, args[3]) or args[3]) or 0
     local raw_time   = resolve_path(src, args[4]) or args[4]
     if raw_time == nil or raw_time == "" then
         if action == "volume" then
-            obs.obs_source_set_volume(source, target_val)
+            obslua.obs_source_set_volume(source, target_val)
         end
-        obs.obs_source_release(source)
+        obslua.obs_source_release(source)
         return true
     end
     if not state.initialized then
@@ -1763,7 +1799,7 @@ ANIM_LIB["sound"] = function(src, state, args)
         state.target_val = target_val
         
         if action == "volume" then
-            state.start_val = obs.obs_source_get_volume(source)
+            state.start_val = obslua.obs_source_get_volume(source)
         else
             state.start_val = 0
         end
@@ -1774,9 +1810,9 @@ ANIM_LIB["sound"] = function(src, state, args)
     local progress = math.min(state.elapsed / state.duration, 1.0)
     local current_val = state.start_val + ((state.target_val - state.start_val) * progress)
     if action == "volume" then
-        obs.obs_source_set_volume(source, current_val)
+        obslua.obs_source_set_volume(source, current_val)
     end
-    obs.obs_source_release(source)
+    obslua.obs_source_release(source)
     if progress >= 1.0 then return true end
     return false 
 end
