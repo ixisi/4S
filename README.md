@@ -33,7 +33,7 @@ You can instantly cancel any time-consuming command (like `!wait` or `!move`) if
 * **`!wait|time`**: Pauses the current thread. Accepts formats like `16ms`, `1s`, `1mi`, `1hr`.
 * **`!call | Name | Optional_Args |+|`** - Jumps to a label, runs it, and then returns to where it left off.
 * You can pass temporary local variables: `!call|MyLabel|x:10, y:20 |+|`.
-* **`!return |+|`** - Returns from a `!call`. If used outside a call, it ends the current thread.
+* **`!return |+|`** - Returns from a `!call`.
 * **`!if | val1 | operator | val2 | Label | Mode |+|`** - Compares two values (`==`, `!=`, `>`, `<`, `>=`, `<=`).
 * If true, it jumps to the Label. If you set `Mode` to `ret`, it performs a `!call` instead of a `!jump`.
 * **`!loop |+|`** - Completely resets the script and restarts from the very top _(not recommanded for large codebases)_.
