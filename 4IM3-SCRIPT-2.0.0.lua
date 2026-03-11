@@ -1,5 +1,6 @@
 ANIM_LIB = {}; SCRIPT_FUNCS = {}; src= {}
 auto_cleanup = {}; ACTIVE_FETCH_FILES = {}
+all_source_clones={};
 local EASING_FUNCS = {
     linear      = function(t) return t end,
 
@@ -115,7 +116,7 @@ function compile_line(cmd, args)
             ["media"]=true, ["media_time"]=true, ["filter"]=true,
             ["transition"]=true, ["sound"]=true,["log"]=true,
             ["return"]=true,["switch"]=true,["onpress"]=true,
-            ["fetch"]=true,
+            ["fetch"]=true,["clones"]= true,
             ["sensor"]=true,["easing"]=true,
             ["emitter"]=true,["despawn"]= true,["wait"]= true,
         }
@@ -210,8 +211,11 @@ function compile_line(cmd, args)
                     for _, raw_arg in ipairs(runtime_args) do
 
                         if cmd == "text" then
-                            table.insert(final_args, resolve_path(src, raw_arg))
-                            
+                            local val=resolve_path(src, raw_arg)
+                            if type(val) == 'string' then
+                                val= val:gsub("\\n","\n")
+                            end
+                            table.insert(final_args, val)
                         elseif raw_arg:find(":") then
                             local kv_table = {}
                             local current_state = {}
@@ -709,7 +713,46 @@ ANIM_LIB["move"] = function(src, state, args)
         return false
     end
 end
+-- !clones | remove
+-- !clones | target_name_or_index | remove
+ANIM_LIB["clones"] = function(src, state, args)
+    -- [[ ENGINE PATCH: Stop resolving the raw command arguments ]]
+    local arg1 = args[1]
+    local arg2 = args[2]
 
+    if arg1 == "remove" then
+        -- Wipe out EVERY clone currently tracked in memory
+        for i = #all_source_clones, 1, -1 do
+            local item = all_source_clones[i]
+            if item and item.remove then pcall(function() item.remove() end) end
+            table.remove(all_source_clones, i)
+        end
+    elseif arg2 == "remove" then
+        -- Search for a specific clone by Index or OBS Source Name
+        local target_val = resolve_path(src, arg1) or arg1
+        local target_idx = tonumber(target_val)
+        
+        for i = #all_source_clones, 1, -1 do
+            local item = all_source_clones[i]
+            local is_match = false
+            
+            if target_idx and i == target_idx then
+                is_match = true
+            else
+                local name = ""
+                pcall(function() name = item.get_name() end)
+                if name == tostring(target_val) then is_match = true end
+            end
+
+            if is_match then
+                if item and item.remove then pcall(function() item.remove() end) end
+                table.remove(all_source_clones, i)
+                break 
+            end
+        end
+    end
+    return true
+end
 
 ANIM_LIB["fetch"] = function(src, state, args)
     if not state.init then
@@ -1848,6 +1891,7 @@ SCRIPT_FUNCS = {
         if auto_delete then
             table.insert(auto_cleanup, wrapped)
         end
+        table.insert(all_source_clones, wrapped)
         return wrapped
     end,
 
@@ -2076,8 +2120,8 @@ function run_code(src, settings)
             raw_code = file:read("*all"); file:close()
         end
     end
+    all_source_clones={}
     obs.register:remove_all()
-
     if auto_cleanup then
         for _, item in ipairs(auto_cleanup) do
             if item and item.data then item.remove() end
@@ -2440,7 +2484,7 @@ function script_tick(fps)
     if src.async_tasks then
         for i = #src.async_tasks, 1, -1 do
             local task = src.async_tasks[i]
-            if task.type == "EMITTER" then
+            if task and task.type == "EMITTER" then
                 local now = os.clock()
                 if (now - task.last_spawn_time) * 1000 >= task.interval then
                     task.last_spawn_time = now
@@ -2471,7 +2515,7 @@ function script_tick(fps)
                         table.remove(src.async_tasks, i)
                     end
                 end
-            elseif task.type == "LIFETIME" then
+            elseif task and task.type == "LIFETIME" then
                 if os.clock() >= task.expire_time then
                     local item = task.item
                     if item then
@@ -2510,7 +2554,7 @@ function script_tick(fps)
                     end
                     table.remove(src.async_tasks, i)
                 end
-            elseif task.type == "THREAD" then
+            elseif task and task.type == "THREAD" then
                 local ops = 0
                 while task.queue[task.current_idx] do
                     if ops >= 10 then break end
@@ -2562,10 +2606,12 @@ function script_tick(fps)
                 if task.current_idx > #task.queue then table.remove(src.async_tasks, i) end
 
             else
-                if not task.exe then task.exe = compile_line(task.cmd, task.args) end
-                if task.exe then
-                    local is_finished = task.exe(src, task.state)
-                    if is_finished then table.remove(src.async_tasks, i) end
+                if task then
+                    if not task.exe then task.exe = compile_line(task.cmd, task.args) end
+                    if task.exe then
+                        local is_finished = task.exe(src, task.state)
+                        if is_finished then table.remove(src.async_tasks, i) end
+                    end
                 end
             end
         end
