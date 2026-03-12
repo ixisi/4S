@@ -108,9 +108,9 @@ function compile_line(cmd, args)
     local function process_args(src, raw_args)
 
         local skip_commands = { 
-            ["gvar"]= true, ["var"]=true, ["label"]=true, ["jump"]=true, ["call"]=true, 
+            ["var"]=true, ["label"]=true, ["jump"]=true, ["call"]=true, 
             ["change"]=true, ["attach"]=true, ["pin"]=true, ["source"]=true, 
-            ["if"]=true, ["run"]=true, ["collision"]=true, 
+            ["if"]=true, ["run"]=true, ["spawn"]= true, ["collision"]=true, 
             ["array.push"]=true, ["array.clear"]=true, ["foreach"]=true,
             ["array.pop"]=true, ["array.remove"]=true,
             ["media"]=true, ["media_time"]=true, ["filter"]=true,
@@ -133,13 +133,8 @@ function compile_line(cmd, args)
                 else
                     local interpolated = raw_arg:gsub("([%a_][%w_%.]*)(:?)", function(word, colon)
                         if colon == ":" then return word .. colon end 
-                        
-                        if src.active_scope and src.active_scope[word] ~= nil then 
-                            return tostring(src.active_scope[word]) .. colon 
-                        end
-                        if src.vars and src.vars[word] ~= nil then 
-                            return tostring(src.vars[word]) .. colon 
-                        end
+                        local s, val = retrieve_scope(src.active_scope, word)
+                        if s and val ~= nil then return tostring(val) .. colon end
                         return word .. colon
                     end)
                     local clean_arg = interpolated:match('^"(.*)"$') or interpolated:match("^'(.*)'$") or interpolated
@@ -298,8 +293,68 @@ function split(str, sep)
     end
     return result
 end
+function retrieve_scope(scope, key)
+    if type(scope) ~= "table" then return nil, nil end
+    
+    -- 1. Check current scope
+    for k, v in pairs(scope) do
+        if type(k) == "string" and k == key then return scope, v end
+    end
+    
+    -- 2. Deep nested scope search (parents are stored at numeric indices)
+    for k, nscope in pairs(scope) do
+        if type(k) == "number" and type(nscope) == "table" then
+            local found_scope, found_val = retrieve_scope(nscope, key)
+            if found_scope then return found_scope, found_val end
+        end
+    end
+    
+    return nil, nil
+end
+function update_variable_state(src, var_name, var_value)
+    if not var_name or type(var_name) ~= "string" then return nil end
 
+    -- [[ ENGINE PATCH: NEVER resolve the variable name! Only the value. ]]
+    local resolved_val = resolve_path(src, var_value)
+    if resolved_val == nil then resolved_val = var_value end
 
+    local root_var = var_name:match("^([^%.%[]+)") or var_name
+    if not src.active_scope then src.active_scope = {} end
+
+    local target_scope, _ = retrieve_scope(src.active_scope, root_var)
+    if not target_scope then
+        target_scope = src.active_scope
+    end
+
+    if var_name:find("%.") or var_name:find("%[") then
+        local normalized = var_name:gsub("%[%s*\"(.-)\"%s*%]", ".%1")
+        normalized = normalized:gsub("%[%s*'(.-)'%s*%]", ".%1")
+        normalized = normalized:gsub("%[%s*(%d+)%s*%]", ".%1")
+        normalized = normalized:gsub("^%.", "")
+
+        local parts = split(normalized, ".")
+        local current = target_scope
+        for i = 1, #parts - 1 do
+            local key = parts[i]
+            local num_key = tonumber(key)
+            local actual_key = (num_key and current[num_key] ~= nil) and num_key or key
+
+            if type(current[actual_key]) ~= "table" then current[actual_key] = {} end
+            current = current[actual_key]
+        end
+
+        local final_key = parts[#parts]
+        local num_final = tonumber(final_key)
+        if num_final then
+            current[num_final] = resolved_val
+        else
+            current[final_key] = resolved_val
+        end
+    else
+        target_scope[var_name] = resolved_val
+    end
+    return true
+end
 function safe_split(str)
     if not str then return {} end
     local chunks = {}
@@ -399,25 +454,10 @@ ANIM_LIB["array.push"] = function(src, state, args)
             end)
         end
     end
-    local target_array = nil
-    if src.active_task and src.active_task.variables and type(src.active_task.variables[arr_name]) == "table" then
-        target_array = src.active_task.variables[arr_name]
-    elseif src.active_scope and type(src.active_scope[arr_name]) == "table" then
-        target_array = src.active_scope[arr_name]
-    elseif src.vars and type(src.vars[arr_name]) == "table" then
-        target_array = src.vars[arr_name]
-    end
-    
+    local target_array = resolve_path(src, arr_name)
     if not target_array then
         target_array = {}
-        if src.active_task and src.active_task.variables then
-            src.active_task.variables[arr_name] = target_array
-        elseif src.active_scope then
-            src.active_scope[arr_name] = target_array
-        else
-            if not src.vars then src.vars = {} end
-            src.vars[arr_name] = target_array
-        end
+        update_variable_state(src, arr_name, target_array)
     end
     
     local resolved_val = resolve_path(src, raw_val) or raw_val
@@ -427,24 +467,11 @@ end
 ANIM_LIB["array.pop"] = function(src, state, args)
     local array_name = args[1]
     local save_var = args[2]
-    local target_array = nil
-    if src.active_task and src.active_task.variables and type(src.active_task.variables[array_name]) == "table" then
-        target_array = src.active_task.variables[array_name]
-    elseif src.active_scope and type(src.active_scope[array_name]) == "table" then
-        target_array = src.active_scope[array_name]
-    elseif src.vars and type(src.vars[array_name]) == "table" then
-        target_array = src.vars[array_name]
-    end
+    local target_array = resolve_path(src, array_name)
     if target_array and #target_array > 0 then
         local popped_val = table.remove(target_array)
-        
-        if save_var then
-            if not src.active_scope then src.active_scope = {} end
-            if src.active_task and src.active_task.variables then
-                src.active_task.variables[save_var] = popped_val
-            else
-                src.active_scope[save_var] = popped_val
-            end
+        if save_var then            
+            update_variable_state(src, save_var, popped_val)
         end
     end
     return true
@@ -459,18 +486,8 @@ ANIM_LIB["array.remove"] = function(src, state, args)
         end)
     end
     local value_to_remove = resolve_path(src, args[2]) or args[2] 
-
-    local target_array = nil
-    if src.active_task and src.active_task.variables and type(src.active_task.variables[array_name]) == "table" then
-        target_array = src.active_task.variables[array_name]
-    elseif src.active_scope and type(src.active_scope[array_name]) == "table" then
-        target_array = src.active_scope[array_name]
-    elseif src.vars and type(src.vars[array_name]) == "table" then
-        target_array = src.vars[array_name]
-    end
-
+    local target_array = resolve_path(src, array_name)
     if target_array then
-
         for i = #target_array, 1, -1 do
             if target_array[i] == value_to_remove then
                 table.remove(target_array, i)
@@ -482,7 +499,7 @@ ANIM_LIB["array.remove"] = function(src, state, args)
 end
 ANIM_LIB["array.clear"] = function(src, state, args)
     local arr_name = args[1]
-    if src.vars then src.vars[arr_name] = {} end
+    update_variable_state(src, arr_name, "{}")
     return true
 end
 
@@ -500,7 +517,9 @@ ANIM_LIB["foreach"] = function(src, state, args)
     for key, val in iterator(arr) do
         if src.labels and src.labels[target_label] then
             local snapshot = {}
-            for k, v in pairs(src.active_scope or {}) do snapshot[k] = v end
+            if src.active_scope then
+                table.insert(snapshot, src.active_scope)
+            end
             
             snapshot[iter_name] = val
             snapshot["_key"] = key  
@@ -510,7 +529,7 @@ ANIM_LIB["foreach"] = function(src, state, args)
                 type = "THREAD", queue = src.queue, labels = src.labels,
                 current_idx = src.labels[target_label], state = {},
                 active_source = src.scene_item, active_sources = src.active_sources,
-                variables = snapshot, call_stack = {}
+                scopes = snapshot, call_stack = {}
             }
             if not src.async_tasks then src.async_tasks = {} end
             table.insert(src.async_tasks, interrupt_thread)
@@ -524,7 +543,9 @@ ANIM_LIB["onpress"] = function(src, state, args)
     local target_label = args[2]
     local target_label2 = args[3]
     local snapshot = {}
-    for k, v in pairs(src.active_scope or {}) do snapshot[k] = v end
+    if src.active_scope then
+        table.insert(snapshot, src.active_scope)
+    end
     
     local locked_source = src.scene_item
     local locked_sources = {}
@@ -537,7 +558,7 @@ ANIM_LIB["onpress"] = function(src, state, args)
                 type = "THREAD", queue = src.queue, labels = src.labels,
                 current_idx = src.labels[target_label], state = {},
                 active_source = locked_source, active_sources = locked_sources,
-                variables = snapshot, call_stack = {}
+                scopes = snapshot, call_stack = {}
             }
             if not src.async_tasks then src.async_tasks = {} end
             table.insert(src.async_tasks, interrupt_thread)
@@ -546,7 +567,7 @@ ANIM_LIB["onpress"] = function(src, state, args)
                 type = "THREAD", queue = src.queue, labels = src.labels,
                 current_idx = src.labels[target_label2], state = {},
                 active_source = locked_source, active_sources = locked_sources,
-                variables = snapshot, call_stack = {}
+                scopes = snapshot, call_stack = {}
             }
             if not src.async_tasks then src.async_tasks = {} end
             table.insert(src.async_tasks, interrupt_thread)
@@ -555,27 +576,10 @@ ANIM_LIB["onpress"] = function(src, state, args)
     
     return true
 end
-ANIM_LIB["media_time"] = function(src, state, args)
-    local target_name = resolve_path(src, args[1]) or args[1]
-    local var_name = args[2]
 
-    local source = obslua.obs_get_source_by_name(target_name)
-    if not source then return true end
 
-    local time_ms = obslua.obs_source_media_get_time(source)
-    obslua.obs_source_release(source)
-    if not src.active_scope then src.active_scope = {} end
-    if src.active_task and src.active_task.variables then
-        src.active_task.variables[var_name] = time_ms
-    else
-        src.active_scope[var_name] = time_ms
-    end
-
-    return true
-end
-
+-- broken have to re-write it again!
 ANIM_LIB["filter"] = function(src, state, args)
-
     if #args < 5 or args[5] == nil or args[5] == "" then
         local target_name = resolve_path(src, args[1]) or args[1]
         local filter_name = resolve_path(src, args[2]) or args[2]
@@ -627,8 +631,10 @@ ANIM_LIB["filter"] = function(src, state, args)
         end
         state.initialized = true
     end
-
-    local dt = (src.vars and src.vars["tick"]) or 0.016
+    local target_scope, dt= retrieve_scope(src.active_scope, "tick")
+    if dt == nil then
+        dt= 0.016
+    end
     state.elapsed = state.elapsed + dt
     local progress = math.min(state.elapsed / state.duration, 1.0)
     
@@ -839,16 +845,7 @@ ANIM_LIB["fetch"] = function(src, state, args)
             local success, json_obj = pcall(function() return obs.utils.json(result) end)
             if success and json_obj then final_data = json_obj end
         end
-        
-        if src.active_task and src.active_task.variables then
-            src.active_task.variables[state.save_var] = final_data
-        elseif src.active_scope then
-            src.active_scope[state.save_var] = final_data
-        else
-            if not src.vars then src.vars = {} end
-            src.vars[state.save_var] = final_data
-        end
-        
+        update_variable_state(src, state.save_var, final_data)
         return true
     end
 
@@ -1009,9 +1006,11 @@ ANIM_LIB["var"] = function(src, state, args)
             end)
         end
     end
-    if not src.active_scope then src.active_scope = {} end
-    local target_scope = (src.active_task and src.active_task.variables) and src.active_task.variables or src.active_scope
-    
+    local root_var = type(var_name) == "string" and var_name:match("^([^%.%[]+)") or var_name
+    local target_scope, _ = retrieve_scope(src.active_scope, root_var)
+    if not target_scope then 
+        target_scope = src.active_scope 
+    end
     local resolved_val
     if raw_val == "[]" or raw_val == "{}" then
         resolved_val = {}
@@ -1056,81 +1055,9 @@ ANIM_LIB["var"] = function(src, state, args)
         else
             current[final_key] = resolved_val
         end
-    else
+    elseif target_scope and type(target_scope) == "table" then
         target_scope[var_name] = resolved_val
     end
-    
-    return true
-end
-
-ANIM_LIB["gvar"] = function(src, state, args)
-    local var_name = args[1]
-    local raw_val = args[2]
-    if type(var_name) == "string" and var_name:find("%(") then
-        var_name = var_name:gsub("(%b())", function(match_block)
-            local res = evaluate_math(src, match_block)
-            return res ~= nil and tostring(res) or match_block
-        end)
-    end
-    if type(raw_val) == "string" and raw_val:find("%(") then
-        if not raw_val:match("^%b()$") then
-            raw_val = raw_val:gsub("%((.-)%)", function(match)
-                local res = resolve_path(src, match)
-                return res ~= nil and tostring(res) or "nil"
-            end)
-        end
-    end
-    if not src.vars then src.vars = {} end
-    local target_scope = src.vars
-    
-    local resolved_val
-    if raw_val == "[]" or raw_val == "{}" then
-        resolved_val = {}
-    else
-        resolved_val = resolve_path(src, raw_val)
-        if resolved_val == nil then resolved_val = raw_val end
-        
-        if type(raw_val) == "string" then
-            local op = raw_val:sub(1,2)
-            if op == "++" or op == "--" or op == "**" then
-                local c_val = tonumber(src.vars[var_name]) or 0
-                local modification = tonumber(resolve_path(src, raw_val:sub(3))) or 0
-                
-                if op == "++" then resolved_val = c_val + modification
-                elseif op == "--" then resolved_val = c_val - modification
-                elseif op == "**" then resolved_val = c_val * modification end
-            end
-        end
-    end
-
-    if type(var_name) == "string" and (var_name:find("%.") or var_name:find("%[")) then
-        local normalized = var_name:gsub("%[%s*\"(.-)\"%s*%]", ".%1")
-        normalized = normalized:gsub("%[%s*'(.-)'%s*%]", ".%1")
-        normalized = normalized:gsub("%[%s*(%d+)%s*%]", ".%1")
-        normalized = normalized:gsub("^%.", "")
-        
-        local parts = split(normalized, ".")
-        local current = target_scope
-        for i = 1, #parts - 1 do
-            local key = parts[i]
-            local num_key = tonumber(key)
-            local actual_key = (num_key and current[num_key] ~= nil) and num_key or key
-            
-            if type(current[actual_key]) ~= "table" then current[actual_key] = {} end
-            current = current[actual_key]
-        end
-        
-        local final_key = parts[#parts]
-        local num_final = tonumber(final_key)
-        if num_final then
-            current[num_final] = resolved_val
-        else
-            current[final_key] = resolved_val
-        end
-    else
-        target_scope[var_name] = resolved_val
-    end
-    
     return true
 end
 -- !jump | LABEL_NAME
@@ -1164,7 +1091,9 @@ ANIM_LIB["attach"] = function(src, state, args)
     if target_item and src.labels[target_label] then
 
         local snapshot = {}
-        for k, v in pairs(src.active_scope or {}) do snapshot[k] = v end
+        if src.active_scope then
+            table.insert(snapshot, src.active_scope)
+        end
 
         local new_thread = {
             type = "THREAD",
@@ -1174,7 +1103,7 @@ ANIM_LIB["attach"] = function(src, state, args)
             state = {}, 
             active_source = target_item, 
             active_sources = {target_item}, 
-            variables = snapshot, 
+            scopes = snapshot, 
             call_stack = {} 
         }
         
@@ -1221,9 +1150,9 @@ ANIM_LIB["delete"] = function(src, state, args)
             local item_name = "unknown_source"
             pcall(function() item_name = item.get_name() or "unknown_source" end)
             local item_id = tostring(item.data)
-            
-            if src.vars and item_name then
-                src.vars[item_name .. "_grounded"] = nil
+            local target_scope, val = retrieve_scope(src.active_scope, item_name)
+            if target_scope then
+                target_scope[item_name .. "_grounded"] = nil
             end
             
             if src.collision_listeners then
@@ -1451,7 +1380,7 @@ ANIM_LIB["dvd"] = function(src, state, args)
     local duration = parse_time(args[2] or "0ms")
     if not state.init then
         local pos = src.scene_item.pos()
-        local bounds = src.vars.screen or { width = 1920, height = 1080 }
+        local bounds = obs.scene:size()
         state.x, state.y = pos.x, pos.y
         state.vx, state.vy = speed, speed
         state.w = src.scene_item.width()
@@ -1508,31 +1437,140 @@ ANIM_LIB["run"] = function(src, state, args)
     local target_label = args[1]
     local snapshot = {}
     if src.active_scope then
-        for k, v in pairs(src.active_scope) do 
-            snapshot[k] = v 
-        end
+        table.insert(snapshot, src.active_scope)
     end
+    
+    local interrupt_thread = nil
+
+    -- 1. Build the Thread
     if type(target_label) == "string" and target_label:match("^{.*}$") then
-        local inner_code = target_label:match("^{(.*)}$")
+        local block_code= target_label:match("^%s*(%b{})%s*$")
+        local inner_code = block_code:sub(2, -2)
+        local sub_queue, sub_labels = compile_block_text(src, inner_code)
+        interrupt_thread = {
+            type = "THREAD", queue = sub_queue, labels = sub_labels,
+            current_idx = 1, state = {},
+            active_source = src.scene_item, active_sources = src.active_sources,
+            scopes = snapshot, call_stack = {}
+        }
+    elseif src.labels and src.labels[target_label] then
+        interrupt_thread = {
+            type = "THREAD", queue = src.queue, labels = src.labels,
+            current_idx = src.labels[target_label], state = {},
+            active_source = src.scene_item, active_sources = src.active_sources,
+            scopes = snapshot, call_stack = {}
+        }
+    end
+
+    if not interrupt_thread then return true end
+
+    local ops = 0
+    while interrupt_thread.queue[interrupt_thread.current_idx] do
+        if ops >= 50 then break end
         
+        local func = interrupt_thread.queue[interrupt_thread.current_idx]
+        local global_item = src.scene_item 
+        local global_sources = src.active_sources
+        local global_scope = src.active_scope
+
+        src.scene_item = interrupt_thread.active_source 
+        src.active_sources = interrupt_thread.active_sources 
+        src.active_scope = interrupt_thread.scopes
+        
+        local result, target = func(src, interrupt_thread.state)
+        
+        interrupt_thread.active_source = src.scene_item
+        interrupt_thread.active_sources = src.active_sources
+        
+        src.scene_item = global_item 
+        src.active_sources = global_sources
+        src.active_scope = global_scope
+
+        if result == false then 
+            break 
+        elseif result == "CALL" then
+            if not interrupt_thread.call_stack then interrupt_thread.call_stack = {} end
+            table.insert(interrupt_thread.call_stack, { idx = interrupt_thread.current_idx + 1, queue = interrupt_thread.queue, labels = interrupt_thread.labels })
+
+            if interrupt_thread.labels[target] then
+                interrupt_thread.current_idx = interrupt_thread.labels[target]
+            elseif src.labels[target] then
+                interrupt_thread.queue = src.queue
+                interrupt_thread.labels = src.labels
+                interrupt_thread.current_idx = src.labels[target]
+            else
+                interrupt_thread.current_idx = interrupt_thread.current_idx + 1
+            end
+            interrupt_thread.state = {}
+        elseif result == "RETURN" then
+            if interrupt_thread.call_stack and #interrupt_thread.call_stack > 0 then
+                local popped = table.remove(interrupt_thread.call_stack)
+                if type(popped) == "table" then
+                    interrupt_thread.current_idx = popped.idx
+                    interrupt_thread.queue = popped.queue
+                    interrupt_thread.labels = popped.labels
+                else
+                    interrupt_thread.current_idx = popped
+                end
+            else
+                interrupt_thread.current_idx = #interrupt_thread.queue + 1 
+            end
+            interrupt_thread.state = {}
+        elseif result == "JUMP" then
+            if interrupt_thread.labels[target] then
+                interrupt_thread.current_idx = interrupt_thread.labels[target]
+            elseif src.labels[target] then
+                interrupt_thread.queue = src.queue
+                interrupt_thread.labels = src.labels
+                interrupt_thread.current_idx = src.labels[target]
+            else
+                interrupt_thread.current_idx = interrupt_thread.current_idx + 1
+            end
+            interrupt_thread.state = {} 
+        else
+            interrupt_thread.current_idx = interrupt_thread.current_idx + 1
+            interrupt_thread.state = {}
+        end
+        ops = ops + 1
+    end
+
+    if interrupt_thread.current_idx <= #interrupt_thread.queue then
+        if not src.async_tasks then src.async_tasks = {} end
+        table.insert(src.async_tasks, interrupt_thread)
+    end
+
+    return true
+end
+-- !spawn | { ... } OR target_label
+ANIM_LIB["spawn"] = function(src, state, args)
+    local target_label = args[1]
+    local snapshot = {}
+    if src.active_scope then
+        table.insert(snapshot, src.active_scope)
+    end
+    
+    if type(target_label) == "string" and target_label:match("^{.*}$") then
+        local block_code = target_label:match("^%s*(%b{})%s*$")
+        local inner_code= block_code:sub(2, -2)
         local sub_queue, sub_labels = compile_block_text(src, inner_code)
         
         local interrupt_thread = {
             type = "THREAD", queue = sub_queue, labels = sub_labels,
             current_idx = 1, state = {},
             active_source = src.scene_item, active_sources = src.active_sources,
-            variables = snapshot, call_stack = {}
+            scopes = snapshot, call_stack = {}
         }
         if not src.async_tasks then src.async_tasks = {} end
         table.insert(src.async_tasks, interrupt_thread)
         return true
     end
+
     if src.labels and src.labels[target_label] then
         local interrupt_thread = {
             type = "THREAD", queue = src.queue, labels = src.labels,
             current_idx = src.labels[target_label], state = {},
             active_source = src.scene_item, active_sources = src.active_sources,
-            variables = snapshot, call_stack = {}
+            scopes = snapshot, call_stack = {}
         }
         if not src.async_tasks then src.async_tasks = {} end
         table.insert(src.async_tasks, interrupt_thread)
@@ -1805,7 +1843,7 @@ ANIM_LIB["sound"] = function(src, state, args)
         end
         state.initialized = true
     end
-    local dt = (src.vars and src.vars["tick"]) or 0.016
+    local dt = (src.active_scope and src.active_scope["tick"]) or 0.016
     state.elapsed = state.elapsed + dt
     local progress = math.min(state.elapsed / state.duration, 1.0)
     local current_val = state.start_val + ((state.target_val - state.start_val) * progress)
@@ -2002,7 +2040,9 @@ function evaluate_math(src, expr)
         for part in string.gmatch(func_name, "[^%.]+") do
             if type(func) == "table" then func = func[part] else func = nil; break end
         end
-        if not func then return 0 end
+        if not func then 
+            return 0 
+        end
         local clean_args = args_block:sub(2, -2)
         local resolved_args = {}
         for _, arg in ipairs(safe_split(clean_args)) do
@@ -2017,20 +2057,23 @@ function evaluate_math(src, expr)
         if type(result) ~= "number" then return 0 end
         return result
     end)
-    working_expr = working_expr:gsub("([%a_][%w_%.]*)", function(var_name)
-        if var_name == "math" or var_name:match("^math%.") then return var_name end
-        if var_name == "floor" or var_name == "ceil" or var_name == "sin" or var_name == "cos" or var_name == "abs" then return var_name end
-        if tonumber(var_name) then return var_name end
-
-        local val = resolve_path(src, var_name)
-        return tonumber(val) or 0
+    local sucess,_ = pcall(function()
+        working_expr = working_expr:gsub("([%a_][%w_%.]*)", function(var_name)
+            if var_name == "math" or var_name:match("^math%.") then return var_name end
+            if var_name == "floor" or var_name == "ceil" or var_name == "sin" or var_name == "cos" or var_name == "abs" then return var_name end
+            if tonumber(var_name) then return var_name end
+            local val = resolve_path(src, var_name)
+            return tonumber(val) or val
+        end)
     end)
+    if not sucess then return working_expr end
     local func = load("return " .. working_expr)
     if func then
         local success, result = pcall(func)
         if success then return result end
+    else
+        return working_expr
     end
-    return 0
 end
 function resolve_path(src, path)
     if path == nil then return nil end
@@ -2038,6 +2081,7 @@ function resolve_path(src, path)
     if type(path) == "string" and path:find("%(") and not path:match("^%b()$") and not path:match("^%-%b()$") and not path:match("^@") and not path:match("^%s*source%s*%(") then
         path = path:gsub("(%b())", function(match_block)
             local res = evaluate_math(src, match_block)
+            
             return res ~= nil and tostring(res) or match_block
         end)
     end
@@ -2055,15 +2099,15 @@ function resolve_path(src, path)
     local parts = split(normalized, ".")
     local root_key = parts[1]
     local current_val = nil
-
-    if src.active_task and src.active_task.variables and src.active_task.variables[root_key] ~= nil then
-        current_val = src.active_task.variables[root_key]
-    elseif src.active_scope and src.active_scope[root_key] ~= nil then
-        current_val = src.active_scope[root_key]
-    elseif src.vars and src.vars[root_key] ~= nil then
-        current_val = src.vars[root_key]
-    elseif src.scene_item and type(src.scene_item[root_key]) == "function" then
+    if src.scene_item and type(src.scene_item[root_key]) == "function" then
         current_val = src.scene_item[root_key]()
+    elseif src.active_scope  then
+        local target_scope, val = retrieve_scope(src.active_scope, root_key)
+        if target_scope then
+            current_val = val
+        else
+            return tonumber(path) or path
+        end
     else
         return tonumber(path) or path
     end
@@ -2192,11 +2236,10 @@ function run_code(src, settings)
     src.active_sources = {}
     src.state = {}
     src.pinned_sources= {}
-    src.active_scope = nil
     src.scene_item = nil
     src.isInitialized = true
     src.colliders = {}
-    src.vars = src.vars or { screen = obs.scene:size() , pi = math.pi, huge = math.huge}
+    src.active_scope = { screen = obs.scene:size() , pi = math.pi, huge = math.huge}
     src.call_stack = {}
     local compiled_queue, compiled_labels = compile_block_text(src, code)
     src.queue = compiled_queue
@@ -2383,8 +2426,8 @@ end
 
 function script_tick(fps)
     if not src.isInitialized or not src.queue then return end
-    if not src.vars then src.vars = {} end
-    src.vars["tick"]=fps or 0.016
+    if not src.active_scope then src.active_scope = {} end
+    src.active_scope["tick"]=fps or 0.016
     -- [[ INTERRUPT INTERCEPTOR ]]
     if src.interrupt_label then
         local jmp_idx = src.labels[src.interrupt_label]
@@ -2426,7 +2469,9 @@ function script_tick(fps)
                         if src.labels and src.labels[col.target_label] then
                             
                             local snapshot = {}
-                            for k, v in pairs(src.active_scope or {}) do snapshot[k] = v end
+                            if src.active_scope then
+                                table.insert(snapshot, src.active_scope)
+                            end
                             
                             snapshot[obj2.get_name()] = obj2
                             
@@ -2438,7 +2483,7 @@ function script_tick(fps)
                                 state = {},
                                 active_source = src.scene_item, 
                                 active_sources = src.active_sources,
-                                variables = snapshot, 
+                                scopes = snapshot, 
                                 call_stack = {}
                             }
                             
@@ -2504,12 +2549,14 @@ function script_tick(fps)
                 if condition_met then
                     if src.labels[w.label] then
                         local snapshot = {}
-                        for k, v in pairs(src.active_scope or {}) do snapshot[k] = v end
+                        if src.active_scope then
+                            table.insert(snapshot, src.active_scope)
+                        end
                         local interrupt_thread = {
                             type = "THREAD", queue = src.queue, labels = src.labels,
                             current_idx = src.labels[w.label], state = {},
                             active_source = src.scene_item, active_sources = src.active_sources,
-                            variables = snapshot, call_stack = {}
+                            scopes = snapshot, call_stack = {}
                         }
                         table.insert(src.async_tasks, interrupt_thread)
                     end
@@ -2535,13 +2582,15 @@ function script_tick(fps)
 
                         if cloned_item and task.labels[task.setup_label] then
                             local snapshot = {}
-                            for k, v in pairs(src.active_scope or {}) do snapshot[k] = v end
+                            if src.active_scope then
+                                table.insert(snapshot, src.active_scope)
+                            end
 
                             local new_thread = {
                                 type = "THREAD", queue = task.queue, labels = task.labels,
                                 current_idx = task.labels[task.setup_label], state = {},
                                 active_source = cloned_item, active_sources = {cloned_item},
-                                variables = snapshot, call_stack = {}
+                                scopes = snapshot, call_stack = {}
                             }
                             table.insert(src.async_tasks, new_thread)
                         end
@@ -2558,8 +2607,10 @@ function script_tick(fps)
                         local item_name = "unknown_source"
                         pcall(function() item_name = item.get_name() or "unknown_source" end)
                         local item_id = tostring(item.data)
-                        
-                        if src.vars then src.vars[item_name .. "_grounded"] = nil end
+                        local target_scope, _ = retrieve_scope(src.active_scope, item_name)
+                        if target_scope then
+                            target_scope[item_name .. "_grounded"]= nil
+                        end
                         
                         if src.collision_listeners then
                             for j = #src.collision_listeners, 1, -1 do
@@ -2603,7 +2654,7 @@ function script_tick(fps)
 
                     src.scene_item = task.active_source 
                     src.active_sources = task.active_sources 
-                    src.active_scope = task.variables 
+                    src.active_scope = task.scopes
                     
                     local result, target = func(src, task.state)
                     
@@ -2615,22 +2666,44 @@ function script_tick(fps)
                     src.active_scope = global_scope
                     
                     if result == false then break 
-                    elseif result == "CALL" then
+                        elseif result == "CALL" then
                         if not task.call_stack then task.call_stack = {} end
-                        table.insert(task.call_stack, task.current_idx + 1)
-                        local jmp = task.labels[target]
-                        if jmp then task.current_idx = jmp else task.current_idx = task.current_idx + 1 end
+                        table.insert(task.call_stack, { idx = task.current_idx + 1, queue = task.queue, labels = task.labels })
+
+                        if task.labels[target] then
+                            task.current_idx = task.labels[target]
+                        elseif src.labels[target] then
+                            task.queue = src.queue
+                            task.labels = src.labels
+                            task.current_idx = src.labels[target]
+                        else
+                            task.current_idx = task.current_idx + 1
+                        end
                         task.state = {}
                     elseif result == "RETURN" then
                         if task.call_stack and #task.call_stack > 0 then
-                            task.current_idx = table.remove(task.call_stack)
+                            local popped = table.remove(task.call_stack)
+                            if type(popped) == "table" then
+                                task.current_idx = popped.idx
+                                task.queue = popped.queue
+                                task.labels = popped.labels
+                            else
+                                task.current_idx = popped
+                            end
                         else
                             task.current_idx = #task.queue + 1 
                         end
                         task.state = {}
                     elseif result == "JUMP" then
-                        local jmp = task.labels[target]
-                        if jmp then task.current_idx = jmp else task.current_idx = task.current_idx + 1 end
+                        if task.labels[target] then
+                            task.current_idx = task.labels[target]
+                        elseif src.labels[target] then
+                            task.queue = src.queue
+                            task.labels = src.labels
+                            task.current_idx = src.labels[target]
+                        else
+                            task.current_idx = task.current_idx + 1
+                        end
                         task.state = {} 
                     else
                         task.current_idx = task.current_idx + 1
@@ -2768,6 +2841,7 @@ end
 
 
 
+
 -- [[ OBS CUSTOM API BEGIN ]]
     -- [[ OBS CUSTOM CALLBACKS ]]
         function script_load(settings)
@@ -2848,6 +2922,11 @@ end
                     elseif type(iter) == "function" then
                         pcall(function() iter() end)
                     end
+                end
+            end
+            for _, event in pairs(obs.register.event_id_list) do
+                if event and type(event.remove) == "function" then
+                    event.remove(true)
                 end
             end
             if unset and type(unset) == "function" then
@@ -3735,6 +3814,10 @@ end
 
                     if src.filter then
                         local width = src.width; local height = src.height
+                        if not width or not height or (width <= 0 or height <= 0) then
+                            obslua.obs_source_skip_video_filter(src.filter)
+                            return nil
+                        end
                         if not obslua.obs_source_process_filter_begin(
                                 src.filter, obslua.GS_RGBA, obslua.OBS_NO_DIRECT_RENDERING
                             ) then
@@ -4013,7 +4096,29 @@ end
                                 })
                             end)
                         end,
+                        order= function(obs_enum_order_or_idx)
 
+                            if not obs_enum_order_or_idx or not (type(obs_enum_order_or_idx) == "number") then
+                                return obslua.obs_sceneitem_get_order_position(obj_source_t.data)
+                            end
+                            if obs_enum_order_or_idx == obslua.OBS_ORDER_MOVE_UP or 
+                            obs_enum_order_or_idx == obslua.OBS_ORDER_MOVE_DOWN or 
+                            obs_enum_order_or_idx == obslua.OBS_ORDER_MOVE_TOP or
+                            obs_enum_order_or_idx == obslua.OBS_ORDER_MOVE_BOTTOM then
+                                return obslua.obs_sceneitem_set_order(obj_source_t.data, obs_enum_order_or_idx)
+                            else
+                                return obslua.obs_sceneitem_set_order_position(obj_source_t.data, obs_enum_order_or_idx)
+                            end
+                        end,
+                        ground=function()
+                            return obj_source_t.order(obslua.OBS_ORDER_MOVE_BOTTOM)
+                        end,up=function()
+                            return obj_source_t.order(obslua.OBS_ORDER_MOVE_UP)
+                        end,down=function()
+                            return obj_source_t.order(obslua.OBS_ORDER_MOVE_DOWN)
+                        end,top=function()
+                            return obj_source_t.order(obslua.OBS_ORDER_MOVE_TOP)
+                        end,
                         width = function(val)
                             obj_source_t._sync_shadow()
                             if val == nil or type(val) ~= "number" then
@@ -4159,7 +4264,9 @@ end
 
                                     return
                                 end
+                                obslua.obs_sceneitem_defer_update_begin(obj_source_t.data)
                                 obslua.obs_sceneitem_set_info2(obj_source_t.data, info)
+                                obslua.obs_sceneitem_defer_update_end(obj_source_t.data)
                                 return true
                             end)
                         end,
@@ -4527,9 +4634,11 @@ end
                     return obj_scene_t.free()
                 end,
                 get_width = function()
+                    local w= obslua.obs_source_get_width(source_scene)
                     return obslua.obs_source_get_base_width(source_scene)
                 end,
                 get_height = function()
+                    local h= obslua.obs_source_get_height(source_scene)
                     return obslua.obs_source_get_base_height(source_scene)
                 end,
                 data = scene,
