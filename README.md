@@ -191,13 +191,13 @@ This snippet shows how to use math inside arguments `( )` to smoothly shrink a U
 ### 3. The "Fire & Forget" VFX Thread
 
 Want a magical crystal to pulse and hover in the background while your main script does other things? 
-Use `!run` to spin up a parallel thread and drop a VFX macro inside.
+Use `!spawn` to spin up a parallel thread and drop a VFX macro inside.
 
 ```text
 !source|MagicCrystal |+|
 
 -- Spawns a background thread that runs independently
-!run{
+!spawn{
     -- The breathing macro scales and pulses opacity automatically
     -- The '0' duration means it loops infinitely
     !breathing|0.05|0 |+|
