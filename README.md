@@ -51,7 +51,8 @@ You can instantly cancel any time-consuming command (like `!wait` or `!move`) if
 ### Background Threads & Scope
 
 * **`!source|name1|name2...`**: Sets the Active Source scope. All subsequent commands (like `!move`) will apply to these sources until `!source` is called empty to clear the scope.
-* **`!run { code } |+|`** or **`!run | Label |+|`** - Spawns a background thread that runs simultaneously.
+* **`!spawn { code } |+|`** or **`!spawn | Label |+|`** - Spawns a background thread that runs simultaneously.
+* **`!run { code } |+|`** or **`!run | Label |+|`** - Joins the current thread.
 * **`!foreach | array_name | item_var | Label |+|`** - Loops through an array, spawning a parallel thread for each item.
 * **`!despawn|duration_ms`**: Schedules the active source to automatically delete itself after a set time.
 * **`!stop | TargetName |+|`** - Kills all background threads attached to a specific source. Use `!stop|all` to kill everything.
