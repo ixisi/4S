@@ -111,8 +111,10 @@ Arrays are ordered lists of data, perfect for managing inventories, wave spawn q
 
 **1. Initialization**
 To create an array, use empty brackets `[]`.
-```text
+```
 !var | active_enemies | [] |+|
+-- or dictoniary object
+!var | object_data | {} |+|
 ```
 
 **2. Array Commands**
