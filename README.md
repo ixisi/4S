@@ -73,7 +73,7 @@ To write comments, document your code, or hide entire sections of logic from the
 
 ## 2. Variables, Arrays & State Management
 
-In **4IM3-SCRIPT**, memory is highly flexible. You can store simple numbers, text strings, complex dictionaries, and dynamic arrays. The engine tracks your state globally, meaning a variable updated in one background thread is instantly readable by another.
+Memory is highly flexible. You can store simple numbers, text strings, complex dictionaries, and dynamic arrays. The engine tracks your state globally, meaning a variable updated in one background thread is instantly readable by another.
 
 ### Defining & Updating Variables (`!var`)
 The `!var` command is your primary tool for managing state. If a variable doesn't exist, this command creates it. If it does exist, it overwrites it.
@@ -117,7 +117,6 @@ To create an array, use empty brackets `[]`.
 
 **2. Array Commands**
 The engine provides dedicated commands for manipulating array contents safely:
-
 * **`!array.push`**: Adds a value to the very end of the array.
   `!array.push | active_enemies | "Goblin_1" |+|`
 * **`!array.pop`**: Removes the *last* item from the array. You can optionally provide a variable name to save the removed item.
@@ -149,22 +148,25 @@ Labels are the anchors of your script. They do not execute any logic on their ow
 ```
 
 ### Navigation (`!jump` vs. `!call`)
-There are two distinct ways to move to a label depending on whether you are branching your logic permanently or just running a quick subroutine.
+There are two distinct ways to move to a label depending on whether you are branching your logic permanently or running a subroutine.
 
 * **`!jump` (One-Way Trip):** Instantly aborts the current execution path, moves the thread to the target label, and continues running downward from there.
     ```text
     !jump | start_sequence |+|
     ```
-* **`!call` & `!return` (Round Trip):** Acts exactly like a function call in traditional programming. The engine remembers exactly where it came from, jumps to the label, runs the code, and the moment it hits a `!return` command, it snaps right back to the line immediately following the `!call`.
+
+* **`!call` & `!return` (Round Trip):** Acts exactly like a function call. The engine remembers exactly where it came from, jumps to the label, runs the code, and snaps right back to the line immediately following the call when it hits `!return`.
+    **Passing Arguments:** You can pass an optional comma-separated map of arguments to the subroutine. These values are temporarily injected into the script's memory scope while the subroutine runs.
     ```text
-    !call | update_ui |+|
-    !log | The UI was successfully updated! |+|
+    -- Call the label and pass down 'amount' and 'critical' values
+    !call | take_damage | amount:15, critical:true |+|
 
     -skip-
-    !label | update_ui |+|
-        !source | ScoreUI |+| 
-        !text | SCORE: (score) |+|
-        !return |+|  -- Snaps back to the !log command above
+    !label | take_damage |+|
+        -- The injected arguments are now accessible as variables!
+        !var | player_hp | (player_hp - amount) |+|
+        !if | critical | == | true | play_heavy_hit_sound |+|
+        !return |+|
     -end-
     ```
 
@@ -175,16 +177,36 @@ The `!if` command is your engine's primary decision-maker. It evaluates two valu
 ```text
 !if | value_1 | operator | value_2 | target_label |+|
 ```
-
 **Supported Operators:** `==`, `!=`, `>`, `<`, `>=`, `<=`.
+*(Pro Tip: If you want an `!if` statement to act as a `!call` (round trip) instead of a one-way `!jump`, add `ret` as an optional 5th argument: `!if | hp | < | 50 | heal_logic | ret |+|`)*
 
-*(Pro Tip: If you want an `!if` statement to act as a `!call` (round trip) instead of a one-way `!jump`, you can add `ret` as an optional 5th argument: `!if | hp | < | 50 | heal_logic | ret |+|`)*
+### Fixed Iteration (`!loop`)
+Sometimes you need to repeat a specific action an exact number of times without writing complex counter variables and manual `!if` checks. The `!loop` command automatically repeats a target label or an inline code block for the specified number of iterations. 
+
+The engine automatically injects a hidden variable called `(_index)` into the loop's scope so you know which iteration is currently running. All spawned loop threads run perfectly in parallel.
+
+**Syntax:**
+```text
+!loop | count | target_label |+|
+!loop | count | { ... inline code block ... } |+|
+```
+
+**Example:**
+```text
+-- Spawns 5 random coins instantly using an inline block
+!source | Master_Coin |+|
+!loop | 5 | {
+    !var | new_coin | @clone(true) |+|
+    !source | new_coin |+|
+    !pos | x:(@math.random(100, 1800)), y:-50 |+|
+} |+|
+```
 
 ---
 
 ## 4. Asynchronous Threads (Process Management)
 
-Because scripts execute sequentially from top to bottom, writing a continuous loop using standard navigation commands would block the rest of your code from running. **4IM3-SCRIPT** solves this by providing a robust asynchronous task system. You can spin up dozens of simultaneous background operations while the main script continues to run freely.
+Because scripts execute sequentially from top to bottom, writing a continuous loop using standard navigation commands would block the rest of your code from running. The engine solves this by providing a robust asynchronous task system. You can spin up dozens of simultaneous background operations while the main script continues to run freely.
 
 ### `!spawn` (Global Threads)
 The `!spawn` command is used for **"Fire and Forget"** background logic. It registers a new thread to the background queue and immediately moves on. It does **not** lock onto the currently selected visual source. This makes it perfect for global managers, polling loops, or countdown timers.
@@ -224,7 +246,6 @@ The `!wait` command yields the specific thread it is called inside without freez
 
 ### Terminating Threads (`!stop`)
 The `!stop` command is your internal process manager, allowing you to kill active threads using three distinct targeting methods.
-
 1. **Stop by Label Name:** Target the globally tagged label name. (`!stop | timer_loop |+|`)
 2. **Stop by Attached Component:** Target the specific visual source locked to a `!run` thread. (`!stop | Alert_Icon |+|`)
 3. **The Global Kill Switch:** Instantly terminate every background thread currently running. (`!stop | all |+|`)
@@ -233,7 +254,7 @@ The `!stop` command is your internal process manager, allowing you to kill activ
 
 ## 5. Component System (Sources, Templates, and Physics)
 
-In **4IM3-SCRIPT**, visual elements are dynamic components. The engine allows you to select these elements, duplicate them, manage their lifecycles, and establish continuous physics rules.
+Visual elements are dynamic components. The engine allows you to select these elements, duplicate them, manage their lifecycles, and establish continuous physics rules.
 
 ### Targeting Visual Elements (`!source`)
 The `!source` command sets the "Active Target" for the current thread. Any visual command that follows will automatically apply to this target until you select a new one.
@@ -260,20 +281,21 @@ Duplicate the master component infinitely using the inline `@clone()` macro. Pas
 !pos | x:500, y:-100 |+|
 ```
 
-### Component Relations (`!pin` & `!attach`)
-You can link components together in two distinctly different ways: by their physical position, or by their logical behavior.
+### Component Relations: Positional vs. Behavioral
+You can link components together in two distinctly different ways. It is critical to understand the difference between pinning physical positions and attaching logical behaviors.
 
-* **`!pin` (Positional Tracking):** Pins the currently targeted source to a parent source. The pinned source will automatically follow the parent's coordinates.
+* **`!pin` (Positional Tracking):** Pins the currently targeted source to a parent source. The pinned source will automatically map to the parent's X/Y coordinates on the screen.
     ```text
     -- Syntax: !pin | parent_source | offsets (x:0, y:0) |+|
-    !source | HealthBar_UI |+|
+    !source | Floating_HealthBar |+|
     !pin | Character_Sprite | x:0, y:-50 |+|
     ```
 
-* **`!attach` (Behavioral Tracking):** Attaches a specified label to a target source. This allows you to bind specific logic, background threads, or state behaviors directly to the lifecycle of that element.
+* **`!attach` (Behavioral Tracking):** Attaches a specific logic thread (label) directly to a target source's lifecycle. If the source is ever deleted or destroyed, the attached logic loop is automatically terminated with it. 
     ```text
     -- Syntax: !attach | target_source | label_name |+|
-    !attach | Character_Sprite | character_logic_loop |+|
+    !source | Enemy_Sprite |+|
+    !attach | Enemy_Sprite | enemy_ai_loop |+|
     ```
 
 ### Boundary Physics (`!collision`)
@@ -294,16 +316,15 @@ The `!collision` command sets up a continuous background monitor that checks the
 
 ## 6. Events & Listeners (Interactive Triggers & State Watchers)
 
-**4IM3-SCRIPT** uses an event-driven architecture. You register a listener once, and the engine handles the background monitoring, triggering your logic only when the specific event occurs.
+The engine uses an event-driven architecture. You register a listener once, and the engine handles the background monitoring, triggering your logic only when the specific event occurs.
 
 ### System Hotkeys (`!onpress`)
-The `!onpress` command registers a bindable hotkey title into the system. When the user maps and presses this key, the engine instantly spawns a background thread at your designated label. You can also specify an optional release label.
+The `!onpress` command registers a bindable hotkey title into the host system. When the user maps and presses this key, the engine instantly spawns a background thread at your designated label. You can also specify an optional release label.
 
 **Syntax:**
 ```text
 !onpress | hotkey_title | press_label | release_label (optional) |+|
 ```
-
 **Example:**
 ```text
 !onpress | Trigger_Action | action_start | action_end |+|
@@ -324,13 +345,31 @@ The `!change` command allows you to asynchronously monitor any variable in your 
 !change | current_score | update_ui_label |+|
 ```
 
-### Removing Listeners (`!detach`)
-The `!detach` command allows you to selectively strip active listeners from the engine's memory.
+### Removing Listeners & Behaviors (`!detach`)
+Leaving background listeners, physics calculations, or lifecycles active when they are no longer needed can cause massive memory leaks or unintended behaviors. 
 
-* **Detach a Hotkey:** `!detach | onpress | action_start |+|`
-* **Detach a State Watcher (by variable):** `!detach | change | item_counter |+|`
-* **Detach a State Watcher (by label):** `!detach | change | goal_reached |+|`
-* **Remove ALL Watchers:** `!detach | change |+|`
+The `!detach` command is your universal cleanup tool. It allows you to selectively strip specific behaviors from the engine or from a targeted visual source.
+
+**1. Detaching Global Listeners (No active `!source` required):**
+* **`onpress`:** Detaches a keyboard shortcut by referencing its target label.
+  `!detach | onpress | action_start |+|`
+* **`change`:** Detaches a state watcher by the variable it watches, the label it triggers, or all watchers entirely.
+  `!detach | change | item_counter |+|` *(By Variable)*
+  `!detach | change | goal_reached |+|` *(By Label)*
+  `!detach | change |+|` *(Removes ALL active change watchers)*
+
+**2. Detaching Component Behaviors (Requires an active `!source`):**
+First, select your target using `!source`, then call `!detach` to strip behaviors off of it.
+* **`pin`:** Unlinks the source from its positional parent so it stops following it.
+  `!source | Floating_HealthBar |+| !detach | pin |+|`
+* **`attach` (or `spawn` / `loop`):** Severs any behavioral logic loops currently bound to the source's lifecycle.
+  `!source | Enemy_Sprite |+| !detach | attach |+|`
+* **`collision`:** Removes the source from the boundary physics monitor so it no longer triggers collision events.
+  `!source | Phantom_Ghost |+| !detach | collision |+|`
+* **`emitter`:** Immediately stops a continuous particle system before its duration naturally finishes.
+  `!source | Exhaust_Pipe |+| !detach | emitter |+|`
+* **`despawn`:** Cancels a scheduled death timer, saving the object from being automatically deleted.
+  `!source | PowerUp |+| !detach | despawn |+|`
 
 ---
 
@@ -367,15 +406,15 @@ These run independently for the specified duration.
 ### Particle Systems (`!emitter`)
 The `!emitter` command turns the currently active source into a continuous particle spawner, spraying out clones of a target template.
 ```text
--- Syntax: !emitter | template_id | spawn_rate (ms) | duration |+|
+-- Syntax: !emitter | template_id | max_count | interval_ms | callback_label |+|
 !source | Exhaust_Pipe |+|
-!emitter | smoke_prefab | 50ms | 2.5s |+|
+!emitter | smoke_prefab | 50 | 50ms | move_smoke_up |+|
 ```
 
 ### Scene Control (`!transition` & `!switch`)
-Your script can act as an automated director, managing the active scene and controlling the visual transitions between them.
-* **`!transition | transition_name | duration |+|`**: Sets the active transition type and speed (e.g., Fade, Swipe).
-* **`!switch | scene_name |+|`**: Instantly changes the live output to the specified scene.
+Your script can act as an automated visual director, managing the active visual state and controlling transitions.
+* **`!transition | transition_name | duration |+|`**: Sets the active visual transition type and speed (e.g., Fade, Swipe).
+* **`!switch | scene_name |+|`**: Instantly changes the live visual output to the specified scene configuration.
 
 ---
 
