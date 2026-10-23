@@ -1,8 +1,8 @@
 # 4IM3-SCRIPT 2.3.0
 
-4IM3-SCRIPT is a small language hosted by a single OBS Lua script. A program can control OBS scene sources, draw into an engine-owned pixel renderer or GPU 3D renderer, read input, run animations, and schedule work. You write **4IM3-SCRIPT commands**, not Lua, for ordinary programs.
+4IM3-SCRIPT is a small language hosted by a single OBS Lua script. A program can control OBS scene sources, draw into an engine-owned pixel renderer or GPU 3D renderer, read input, run animations, and schedule work. You write **4IM3-SCRIPT commands**, not Lua, for ordinary programs. The engine file is [`4IM3-SCRIPT-2.3.0.lua`](4IM3-SCRIPT-2.3.0.lua).
 
-This doc explains the language syntax, commands, values, units, and runtime behavior. Start with the tutorial, then use the [command reference](#command-reference) and [units](#units-and-coordinate-systems) while writing programs.
+This single-file reference explains the language syntax, commands, values, units, and runtime behavior. Start with the tutorial, then use the [command reference](#command-reference) and [units](#units-and-coordinate-systems) while writing programs.
 
 ## Contents
 
@@ -16,6 +16,7 @@ This doc explains the language syntax, commands, values, units, and runtime beha
   - [Functions](#functions)
 - [Units and coordinate systems](#units-and-coordinate-systems)
 - [Drawing and animation](#drawing-and-animation)
+- [UI controls](#ui-controls)
   - [Renderer fields](#renderer-creation-fields)
   - [Canvas fields and drawing](#pixel-canvas)
   - [Packed data and sprites](#packed-data-and-sprites)
@@ -24,6 +25,7 @@ This doc explains the language syntax, commands, values, units, and runtime beha
   - [Camera-view textures and clipping planes](#camera-view-textures-and-clipping-planes)
   - [Shaders](#shader-renderer)
 - [Input and timing](#input-and-timing)
+- [Runtime diagnostics](#runtime-diagnostics)
 - [Event handlers](#event-handlers)
 - [3D physics](#3d-physics)
 - [Sources and OBS](#sources-and-obs)
@@ -1160,6 +1162,333 @@ constraint graphs with guaranteed stability. Use smaller substeps and measured
 stress tests rather than assuming a particular body count will meet a frame
 budget.
 
+## UI controls
+
+`!ui` creates persistent controls with automatic drawing, hit testing, hover,
+focus, text editing, and event listeners. A UI owns a transparent pixel canvas
+above the scene; it does not clear an existing game canvas or 3D renderer. No
+browser, CSS library, external font package, or manual frame loop is required.
+Existing `!canvas` drawing and input polling continue to work.
+
+### First UI
+
+This is a complete program. Attributes can be grouped with commas or separated
+with `|`, in any order after the action and control name:
+
+```text
+!var | player_name | "Explorer" |+|
+!ui | create | name:Menu,width:640,height:360 |+|
+
+!ui | frame | form | x:20,y:20,width:600,height:300 | {
+    !ui | label | title | text:"PLAYER",x:12,y:12,width:550 |+|
+    !ui | input | name | x:20,y:72,width:540,bind:player_name,placeholder:"Your name" |+|
+    !ui | button | play | text:"Play",x:20,y:140,width:240 |+|
+    !ui | label | message | text:"Ready",x:20,y:210,width:540 |+|
+} |+|
+
+!play | click | {
+    !message | text:("Hello "..player_name) |+|
+} |+|
+```
+
+The controls remain active after the final statement. The engine samples input
+on OBS ticks and republishes the UI only when its appearance changes.
+
+### Address a widget by its name
+
+After creating a control, its exact name can be used as a command. Attribute
+fields change the control directly; no `set` keyword is needed:
+
+```text
+!ui | button | my_button | text:"Play",x:20,y:20 |+|
+!my_button | text:"Continue",background:"#166781",enabled:true |+|
+!my_button | click | {
+    !my_button | text:"Clicked" |+|
+} |+|
+```
+
+Use the same name in creation and later commands: `my_button` is addressed as
+`!my_button`. No extra registration or variable is needed. Properties retain
+the same grouped/ungrouped syntax, expressions, validation, and style behavior.
+
+```text
+!my_button | css:"color:#FFFFFF; border-radius:10px" |+|
+!my_button | mouse_enter | { !log | "Pointer entered" |+| } |+|
+!my_button | on | click | { !log | "Clicked" |+| } |+|
+!my_button | get | -> | button_info |+|
+!my_button | -> | same_info |+|           -- omit get for a state record
+!my_button | hide |+|
+!my_button | show |+|
+!my_button | off | click |+|
+!my_button | remove |+|
+```
+
+Inputs, frames, checkboxes, sliders, tabs, and labels use the same named form.
+Inputs also support `!field | value | -> | entered`, `!field | value:"New text"`,
+`!field | focus`, `!field | blur`, `!field | paste`, and `!field | copy`.
+A widget's `blur` only clears focus if that widget owns it.
+
+The older forms remain equivalent: `!ui | set | my_button | text:"Continue"`
+and `!ui | click | my_button | { ... }` still work. Listener replacement and
+removal work across both forms because they address the same control/binding.
+Surface creation, named style definitions, and program-wide UI state/cleanup
+continue to use `!ui`.
+
+For named commands, use an identifier such as `my_button` (letters, digits, and
+underscores; start with a letter or underscore) that does not conflict with an
+engine command or a function. Existing built-ins, module commands, and functions
+keep their meaning. A conflicting or non-identifier control name remains usable
+through explicit `!ui` forms. Widget commands belong to the running program;
+removing/clearing its controls leaves no registered global commands behind.
+
+### Surfaces, frames, and tabs
+
+`!ui | create` adds/configures a locked pixel renderer named `name` (default
+`UI`). Its output fills the scene dimensions captured by the program's `screen`
+record. `width` and `height` specify the UI drawing resolution and default to
+`screen.width` and `screen.height`, or 960×540 when unavailable. Coordinates are
+in UI canvas pixels, with the origin at the top left. Preview/projector input
+follows the renderer's current OBS scene-item position, scale, alignment,
+rotation, flip, and crop. Moving or
+resizing the UI source does not require changing button coordinates or event
+listeners. Hidden sources and cropped-out areas cannot receive pointer hits.
+OBS Interact coordinates are already source-local and are mapped directly to
+the UI canvas. UI creation keeps the previously selected drawing canvas intact.
+
+Keep UI renderers as direct items in the scene where they were created. Moving
+an item into a group/another scene disables its preview/projector pointer hits;
+group/nested-scene remapping is not currently enabled. Overlapping UI surfaces
+use UI creation order for input priority. The UI tick reads retained item
+references; it does not enumerate or lock OBS scenes while processing input.
+
+Controls have program-wide unique names. Create another surface with a distinct
+name and use `!ui | use | Menu |+|` to select where new controls are added. Later
+surfaces appear above earlier ones. Existing renderer names must refer to a
+compatible pixel renderer; do not reuse a game canvas name for a UI surface.
+
+`frame`, `box`, and `panel` create the same container. A block automatically
+parents the controls declared inside it. Frames can nest; children are clipped
+to the frame and use coordinates relative to its top-left corner. Moving,
+hiding, disabling, or removing a frame affects its descendants. A frame block
+is a layout grouping, not a new variable scope. Declare controls directly, or
+inside inline `!if`/`!for` blocks. Controls created later by a function or event
+can name their container explicitly with `parent:frame_name`.
+
+```text
+!ui | frame | settings | x:20,y:20,width:500,height:260 | {
+    !ui | button | apply | text:"Apply",x:12,y:12 |+|
+} |+|
+!ui | set | settings | x:80,y:40 |+|
+!ui | hide | settings |+|
+!ui | show | settings |+|
+```
+
+Tabs automatically show their matching content frames; switching pages does not
+destroy controls or lose their values. Tab indices start at 1:
+
+```text
+!ui | tabs | pages | x:20,y:20,width:600,items:["General","Audio"] |+|
+!ui | frame | general | x:20,y:80,width:600,height:240,tabs:pages,tab:1 | {
+    !ui | label | greeting | text:"General settings",width:580 |+|
+} |+|
+!ui | frame | audio | x:20,y:80,width:600,height:240,tabs:pages,tab:2 | {
+    !ui | checkbox | sound | text:"Sound enabled",width:300,checked:true |+|
+} |+|
+!ui | set | pages | value:2 |+|
+```
+
+Create the tabs control before linking content. `items` accepts a nonempty
+dense list of text captions, either a table literal or a table variable. Link
+content with `tabs:name,tab:index`; a hidden page cannot receive clicks or focus.
+Caption lists and container links are set at creation. To replace them, remove
+and recreate the relevant controls. Removing a tabs control also removes its
+linked content frames and their descendants.
+
+### Control attributes
+
+| Control | Specific fields | Value |
+| --- | --- | --- |
+| `frame`, `panel`, `box` | Optional `{ ... }` content block | Container; no value. |
+| `label` | `text` | Drawn text; no value. |
+| `button` | `text` | Click/focus state; no value. |
+| `input` | `value`, `placeholder`, `password`, `max_length`, `bind` | Text string. `value:""`, `password:false`, and `max_length:256` by default. |
+| `checkbox` | `text`, `checked`, `bind` | Numeric 1/0 when read or bound. `checked:false` by default. |
+| `slider` | `value`, `min`, `max`, `step`, `bind` | Number snapped to `step` and clamped to the range. Defaults: `min:0,max:100,step:1,value:0`. |
+| `tabs` | `items`, `value`, `bind` | Selected 1-based index; default 1. Listener `event.text` is the selected caption. |
+
+All controls accept `x`, `y`, `width`, `height`, `visible`, `enabled`, `parent`,
+`style`, the appearance fields below, and optional `tabs`/`tab` page links.
+Defaults are `x:0,y:0,width:200,height:44,visible:true,enabled:true`. Dimensions
+must be positive finite numbers. A parent must be an already-created frame on
+the same surface. Hidden controls are neither drawn nor interactive; disabled
+controls remain visible but cannot be focused or activated. A disabled control
+blocks clicks from passing through to controls beneath it.
+
+`bind:name` connects an input, checkbox, slider, or tabs control to a simple
+variable in the scope where the control was created. If the variable exists,
+its value initializes the control; otherwise the control initializes the
+variable. User edits update it immediately. Later valid variable changes update
+the control. Input strings are single-line and `max_length` counts UTF-8 code
+points. Bindings and parent links are fixed at creation.
+
+```text
+!var | volume | 50 |+|
+!ui | slider | volume_control | x:20,y:20,width:400,min:0,max:100,step:5,bind:volume |+|
+!ui | change | volume_control | { !log | event.value |+| } |+|
+!var | volume | 75 |+|  -- updates the control automatically
+```
+
+### Styling and CSS-style declarations
+
+Use appearance attributes directly or define a reusable named style:
+
+```text
+!ui | style | primary | background:"#166781",color:"#FFFFFF",hover_color:"#2085A5",radius:8 |+|
+!ui | button | save | text:"Save",style:primary,x:20,y:20 |+|
+!ui | button | cancel | text:"Cancel",style:primary,color:"#FFD080",x:240,y:20 |+|
+!ui | style | primary | background:"#234D70" |+|  -- updates both controls
+```
+
+Appearance resolves in this order: engine defaults, parent appearance, named
+style, per-control overrides. Styles must exist before use. Updating a style
+keeps its other properties and updates existing controls; an explicit control
+override continues to win. `!ui | set` can change appearance at runtime.
+
+| Attribute | Meaning / default |
+| --- | --- |
+| `background` / `background_color` | Normal background, `"#172334"`. |
+| `text_color` / `color` | Text color, `"#EDF4FF"`. |
+| `hover_color` / `hover` | Interactive control background under the pointer, `"#294259"`. Frames keep their normal background. |
+| `pressed_color` / `pressed` | Pressed background, selection fill, selected tab, `"#375874"`. |
+| `accent` | Focus border, selected checkbox, slider fill, tab underline, `"#55C8E8"`. |
+| `disabled_color` | Disabled text, placeholder text, slider track, `"#566174"`. |
+| `border_color` | Normal border, `"#34485F"`. |
+| `border_width` | Border thickness in UI pixels, default 1. Focus has at least a 2-pixel accent border. |
+| `radius` / `border_radius` | Corner radius in UI pixels, default 6. |
+| `padding` | Text/control inset in UI pixels, default 10. |
+| `font` / `font_family` | `readable` (5×7 glyphs, default) or `pixel` (3×5 glyphs). |
+| `scale` / `font_scale` | Whole glyph scale from 1 to 16, default 2. |
+| `font_size` | Pixel size from 1 to 112, rounded to the nearest available 7-pixel-based glyph scale. Prefer `scale` for exact bitmap sizing. |
+
+Colors are quoted `"#RRGGBB"` strings or string variables. Borders, radius, and
+padding cannot be negative. Fonts use the engine's built-in canvas glyphs:
+display is predominantly uppercase and does not provide full Unicode shaping
+or IME composition, although text values and editing preserve UTF-8 code points.
+
+`css:` accepts a declaration string using the same supported properties.
+Hyphenated names and numeric `px` suffixes work:
+
+```text
+!ui | style | card | css:"background:#111D2E; color:#EDF4FF; border-color:#3B536D; border-width:2px; border-radius:12px; padding:14px; font-size:14px" |+|
+!ui | frame | options | style:card,x:20,y:20,width:500,height:300 | {
+    !ui | label | heading | text:"Options",width:460 |+|
+} |+|
+```
+
+This is an engine declaration subset, not a browser CSS implementation. It has
+no selectors, external stylesheets, flex/grid layout, animations, percentages,
+font downloads, or CSS shorthand such as `border:1px solid red`. Unknown or
+duplicate properties report an error. Inline `css:` can also specify normal
+control fields such as `width:240px;height:44px`; named styles contain only the
+appearance properties in the table above. Control names and words such as
+`font:readable` are literal; `text`, `value`, and colors can use expressions.
+
+### Widget event listeners
+
+Every control can have listeners. These forms are equivalent:
+
+```text
+!save_button | click | { !log | "Save clicked" |+| } |+|
+!save_button | on | click | { !log | "Save clicked" |+| } |+|
+-- Explicit forms, for a control named save_button:
+!ui | on | save_button | click | { !log | "Save clicked" |+| } |+|
+!ui | click | save_button | { !log | "Save clicked" |+| } |+|
+```
+
+| Event | When it runs |
+| --- | --- |
+| `mouse_enter`, `mouse_leave` | The pointer enters or leaves the topmost target. Labels can listen too; a label without pointer listeners allows pointer hits to pass through. |
+| `press` | Left mouse button goes down on the control. |
+| `release` | A captured left press is released, including outside the control. Losing OBS focus cancels capture. |
+| `click` | Press and release finish on the same active control. Buttons/checkboxes also activate with Enter or Space. |
+| `focus`, `blur` | Keyboard focus is gained or lost. Frames and labels do not take keyboard focus. |
+| `change` | A user edits text, toggles a checkbox, moves a slider, or selects a tab. |
+| `submit` | Enter is pressed in a text field. |
+
+`event` supplies `kind`, `name`, `value`, `text`, `checked` (1/0), pointer `x/y`
+in the control's UI canvas coordinates, and `dt`. `change` also has `old_value`.
+An input's value is text; a checkbox's value is 1/0; a slider's is numeric; a
+tabs control's is its selected index. Other controls have no value. Callback
+bodies share the normal script budget, can call functions and yield, and use
+the scope captured when registered. Keep them short. One binding exists per
+control/event; registering again replaces it. Busy callbacks coalesce pending
+events to the latest record. Global labels are forbidden inside callback bodies.
+
+Programmatic `set`, bound-variable changes, and style changes do not emit
+`change`, which avoids feedback loops. The explicit `paste` action is an edit
+and does emit `change`. Focus operations may emit `focus`/`blur`.
+
+```text
+!ui | off | save | click |+|       -- remove one listener
+!ui | off | save |+|               -- remove this control's listeners
+!events | off | ui |+|             -- remove UI listeners, keep controls
+```
+
+### Text editing, navigation, and reading state
+
+Inputs provide click/drag selection, Shift+click/arrow selection, Home/End,
+Backspace/Delete, Ctrl+A, Ctrl+C/X/V, a visible caret, and horizontal scrolling.
+Editing/navigation keys repeat while held; button activation does not repeat.
+Tab/Shift+Tab visit visible enabled controls in creation order. Focused tabs and
+sliders accept Left/Right and Home/End. Password inputs display `*` and prevent
+copy/cut; the actual string remains in the program's variable and getters.
+Passwords are masked display, not encrypted application storage.
+
+```text
+!ui | focus | name |+|
+!ui | paste | name |+|              -- uses the existing clipboard backend
+!ui | copy | name |+|               -- copies the whole non-password field
+!ui | blur |+|                      -- release keyboard focus
+!ui | value | name | -> | entered |+|
+!ui | get | name | -> | field_info |+|
+!ui | state | -> | ui_info |+|
+```
+
+`value` returns only the control value. `get` returns a fresh record containing
+`name`, `kind`, `text`, `value` where applicable, `checked`, absolute UI `x/y`,
+`width`, `height`, effective `visible` and `enabled`, `focused`, and `hovered`.
+Boolean state fields are numeric 1/0. `state` returns the focused/hovered control
+names (or empty strings), `pointer_captured`, `keyboard_captured`, and `error`
+(the latest clipboard error, or empty). Clipboard availability follows the
+existing OS backend; failure retains the field value and is available in `error`.
+All three getters also accept `into:variable` instead of the final arrow.
+
+UI input shares the existing platform backends and preview/projector focus
+rules. It does not open Interact automatically. Existing gameplay input handlers
+and polling are not suppressed: use `ui_info.keyboard_captured` or
+`pointer_captured` to gate gameplay controls while interacting with menus.
+The engine samples on OBS ticks; a complete tap between samples can be missed.
+IME support and clipboard availability are unchanged from the input/clipboard
+backends.
+
+### Updating and cleanup
+
+```text
+!play | text:"Continue",enabled:true |+|
+!form | hide |+|
+!form | show |+|
+!form | remove |+|                  -- removes descendants and their listeners
+!ui | update |+|                    -- optional immediate drawing/publication
+!ui | clear |+|                     -- remove all UI surfaces/controls/listeners
+```
+
+Rendering normally happens automatically at the end of an OBS script tick.
+Direct attribute updates (and legacy `set`) accept the control's editable fields; `bind`, `parent`, `tabs`, `tab`,
+and `items` are creation-only. Stop-all, Execute/restart, fatal main-program
+errors, script unload, and OBS scripting shutdown release UI controls, listeners,
+captures, and owned pixel buffers. Renderer sources follow the existing engine
+source lifecycle; UI cleanup does not remove unrelated scene sources.
+
 ## Input and timing
 
 The engine can poll keyboard, mouse buttons, pointer position, and focus directly. A key's `down`, `pressed`, and `released` values are numeric `1` or `0`; `pressed` is a one-poll edge, so poll every frame when you need it.
@@ -1176,6 +1505,26 @@ The engine can poll keyboard, mouse buttons, pointer position, and focus directl
 ```
 
 Use `!input | snapshot | controls | W | A | S | D | UP | MOUSE_LEFT |+|` to get one table with `focused`, `mouse_inside`, `x`, `y`, `interaction_source`, and each requested key's `KEY`, `KEY_pressed`, and `KEY_released` fields. `!input | viewport | View |+|` binds native pointer polling to that renderer: `x` and `y` then account for scaling and padding in its Interact preview, and `interaction_source` names `View` while the pointer is inside. Without a viewport binding, the Windows fallback reports main OBS window client coordinates. `!input | keys | controls | W | A | S | D |+|` samples keyboard and focus without a pointer check. Key names are normalized (for example `W`, `UP`, `ENTER`, `MOUSE_LEFT`); unknown names raise an error. A freshly focused key that was already held is blocked until released, so it does not cause a surprise press.
+
+After a mouse button is first requested, the engine samples that button on each
+OBS tick while the program is active. A press/release observed between script
+snapshots is retained until that button is read, even if script work spans several
+ticks. A snapshot can therefore return `MOUSE_LEFT:0`, `MOUSE_LEFT_pressed:1` and
+`MOUSE_LEFT_released:1` together for a completed click. Continuous button state
+keeps its existing meaning. This coalesces at most one press and one release per
+button; it is not a complete OS event queue and cannot recover taps entirely
+between OBS samples. Keyboard polling is unchanged.
+
+Mouse snapshot entries also include `MOUSE_LEFT_pressed_inside`,
+`MOUSE_LEFT_pressed_x`, and `MOUSE_LEFT_pressed_y` (and the corresponding names
+for other requested mouse buttons). When `pressed_inside` is `1`, these are the
+original canvas coordinates of the press; otherwise coordinates are `-1`.
+Use them for button hit testing if the pointer could move before the script
+handles a click; `x/y` remain the current pointer position for hover. Pending
+clicks are discarded on focus loss or replacement of their target window, and
+on Stop/Execute. On Windows, a fresh mouse click that focuses the preview or
+projector is accepted when the button was previously observed up. A button
+already held outside remains blocked until released.
 
 ### Input event handlers
 
@@ -1317,11 +1666,44 @@ Only call it while gameplay has control. This is a single cursor movement with n
 hook, clipping region, persistent capture, or extra DLL; stopping calls immediately
 releases control, including on pause, Stop, reload, and shutdown.
 
-On Windows, `!input | preview |+|` binds the pointer to the OBS main scene preview or a focused **Preview Projector** window. Its `x` and `y` are active scene canvas coordinates, and `interaction_source` is `ScenePreview` while inside. Projector coordinates account for letterboxing. It needs no Interact window. Keep OBS main preview scaling at **Scale to Window** for accurate mapping. `preview` and `viewport` replace each other when called again.
+On Windows, `!input | preview |+|` binds the pointer to the OBS main scene preview or a focused **Preview Projector** window. Its `x` and `y` are active scene canvas coordinates, and `interaction_source` is `ScenePreview` while inside. The engine automatically reads the main preview's Window, Canvas, Output, or manual scaling and scroll positions from OBS's bundled Qt 6 controls; no script setting is needed. Manual scaling is recovered from the displayed scaled dimensions with pixel rounding. Those controls are read asynchronously on OBS's UI thread. Input waits for a valid snapshot after startup or a resize; it does not block OBS. Projectors use their own letterboxed view independently of the main preview's zoom. If an older OBS/Qt build does not expose the preview controls, use **Scale to Window** for the fallback mapping. No Interact window or additional library file is needed. `preview` and `viewport` replace each other when called again. UI widgets use this same automatic mapping.
 
 Use `!input | preview | focus |+|` to bind the preview and request keyboard focus for it on OBS's UI thread. This is useful at game startup or after a click inside the game: otherwise a previously selected zoom dropdown or source list can still react to the game's arrow keys. The request is asynchronous and does not bring OBS in front of another application. A focused Preview Projector keeps its focus. This does not disable OBS shortcuts or consume keys; keep game renderer scene items locked if arrow keys should not nudge them in OBS.
 
 `!projector | fullscreen | monitor:0 |+|` opens OBS's current Preview Projector fullscreen on monitor index 0. The monitor attribute is optional and defaults to 0; use `monitor:1` for the next display. The projector follows OBS's current preview scene. Esc closes the projector window and returns to the main OBS preview; OBS stays open. To bind a key in a frame loop, include `F` in an input snapshot, then call `!if | keys.F_pressed == 1 { !projector | fullscreen | monitor:0 |+| } |+|`. On Windows, the command queues the request for OBS's UI thread and returns immediately; the window appears when that thread processes it. It also binds focused keyboard and scene-relative mouse input to the Preview Projector, so movement and mouse controls continue there without a separate `!input | preview` call. A Preview Projector opened through OBS's own menu is bound automatically when it gains focus. Pressing F while that projector already has focus does not open another. This command uses OBS's frontend API and requires no additional library file.
+
+To keep Esc for a game's pause/menu action, opt in to projector key controls:
+
+```text
+!var | leave_fullscreen | "F11" |+|
+!projector | controls | escape:game,exit_key:leave_fullscreen |+|
+!input | press | F | { !projector | fullscreen | monitor:0 |+| } |+|
+!input | press | ESCAPE | { !log | "Esc reached the game" |+| } |+|
+```
+
+On **Windows OBS**, `escape:game` prevents Preview Projectors from closing on
+Esc; the engine can still poll Esc or deliver its input handler. `exit_key:F11`
+closes the projector instead. The key can be a literal keyboard key or a variable
+containing its name. Defaults for `controls` are `escape:game,exit_key:F11`.
+`escape:default` restores OBS's Esc behavior; `exit_key:none` removes the custom
+exit key. Use both to return to the original controls:
+
+```text
+!projector | controls | escape:default,exit_key:none |+|
+```
+
+`!projector | close |+|` queues closure of the **focused Preview Projector**; it
+does nothing when another window has focus. It never closes OBS or its main
+preview. Programmers can call it from their own input handlers. Projector key
+controls are independent of `!input | preview_menu`, affect only this OBS
+instance's Preview Projectors while the program runs, and restore on program
+completion, Stop, Execute, engine reload, and shutdown. Main-preview keyboard
+behavior remains unchanged. No extra file is installed. `controls` and `close`
+currently report an unsupported error on macOS/Linux; `fullscreen` retains its
+existing behavior there.
+
+To run script logic before closing, set `exit_key:none` and bind your own input
+handler instead, for example `!input | press | F10 | { !projector | close |+| } |+|`.
 
 For games that use right-button drag over OBS's preview or a **Preview Projector**, call `!input | preview_menu | block |+|` after `!input | preview |+|`. On Windows, it temporarily prevents those views' right-click menus while direct mouse polling remains available. `!input | preview_menu | allow |+|` restores the original behavior. The engine also restores it when the program stops, when Execute starts a new program, and when the engine reloads. The main preview uses OBS's bundled Qt 6 widget library; Preview Projector uses a temporary Windows window subclass because OBS opens its menu directly on right-button press. Other OBS controls and non-preview projectors retain their menus. No additional file is installed. Other operating systems report an unsupported input error for `block`.
 
@@ -1344,7 +1726,7 @@ Windows polls the focused OBS main window or Preview Projector; Linux/X11 polls 
 | `preview_menu` | `block` or `allow` | On Windows, suppress or restore right-click menus in the main preview and Preview Projector for a running game. |
 | `text` | `output_var` | Text typed since the previous read; backspace is returned as `\b`. Empty string means no new text. |
 
-Accepted key names are `A`–`Z`, `0`–`9`, `NUMPAD0`–`NUMPAD9`, `NUMPAD_DECIMAL`, `NUMPAD_ADD`, `NUMPAD_SUBTRACT`, `NUMPAD_MULTIPLY`, `NUMPAD_DIVIDE`, `NUMPAD_SEPARATOR`, `F1`–`F12`, `UP`, `DOWN`, `LEFT`, `RIGHT`, `HOME`, `DELETE`, `ENTER`, `SPACE`, `ESCAPE`, `TAB`, `BACKSPACE`, `SHIFT`, `CTRL`, `ALT`, `MOUSE_LEFT`, `MOUSE_RIGHT`, `MOUSE_MIDDLE`, `MOUSE_X1`, and `MOUSE_X2`. Aliases include `RETURN`, `ESC`, `CONTROL`, `DEL` (for `DELETE`), `MOUSE1`–`MOUSE3`, `KP_0`–`KP_9`, and `NUMPAD_0`–`NUMPAD_9`. `ENTER` accepts either Enter key; `KP_ENTER` and `NUMPAD_ENTER` are aliases for it. Number-row keys and named keypad digits remain separate when polling.
+Accepted key names are `A`–`Z`, `0`–`9`, `NUMPAD0`–`NUMPAD9`, `NUMPAD_DECIMAL`, `NUMPAD_ADD`, `NUMPAD_SUBTRACT`, `NUMPAD_MULTIPLY`, `NUMPAD_DIVIDE`, `NUMPAD_SEPARATOR`, `F1`–`F12`, `UP`, `DOWN`, `LEFT`, `RIGHT`, `HOME`, `END`, `DELETE`, `ENTER`, `SPACE`, `ESCAPE`, `TAB`, `BACKSPACE`, `SHIFT`, `CTRL`, `ALT`, `MOUSE_LEFT`, `MOUSE_RIGHT`, `MOUSE_MIDDLE`, `MOUSE_X1`, and `MOUSE_X2`. Aliases include `RETURN`, `ESC`, `CONTROL`, `DEL` (for `DELETE`), `MOUSE1`–`MOUSE3`, `KP_0`–`KP_9`, and `NUMPAD_0`–`NUMPAD_9`. `ENTER` accepts either Enter key; `KP_ENTER` and `NUMPAD_ENTER` are aliases for it. Number-row keys and named keypad digits remain separate when polling.
 
 ```text
 !input | keys | controls | NUMPAD1 | NUMPAD_DECIMAL | ENTER |+|
@@ -1357,6 +1739,31 @@ Text input accepts keypad digits, decimal point, and `+ - * /` (plus a keypad se
 For naming parts or files, call `!input | text | typed |+|` once per frame and append `typed` to your editor's own text field. The command returns printable UTF-8 from OBS interaction events where available. Its Windows and Linux polling fallback supports US keyboard letters, numbers, spaces, common punctuation, Shift, and Backspace, one character per key press; it does not implement key repeat or full IME text composition. Control/Alt combinations are ignored. The script decides how to handle `\b`, Enter, and on-screen focus. On Linux/X11, keep an OBS window focused; other Linux sessions and macOS still require a working Interact event path.
 
 For music timing, `!media | Music | restart |+|` starts a media source, `!media_wait | Music | 12.5s |+|` waits until an **absolute** playhead position, and `!media_time | Music | playhead_ms |+|` reads the current position. Absolute cues avoid drift from chains of relative waits. `!wait | frame` yields until the next OBS tick and updates `tick`; `!wait | 500ms` waits for a duration. Drawing code should normally use `frame`, then multiply speed by `tick`.
+
+## Runtime diagnostics
+
+```text
+!runtime | stats | -> | usage |+|
+!log | ("Running workers: "..usage.workers_running) |+|
+```
+
+The equivalent named form is `!runtime | stats | into:usage |+|`. This takes
+a read-only snapshot and does not force garbage collection or release resources.
+Sample periodically, rather than on every drawing command: object counting
+visits the current object tables.
+
+| Field | Meaning |
+| --- | --- |
+| `lua_kib` | Memory reported by Lua's collector in KiB for the current Lua VM. Includes scripts, tables and uncollected Lua allocations in that VM; excludes GPU memory, native worker Lua states, socket/kernel buffers and total OBS process memory. It is not per-program ownership or proof of a memory leak. |
+| `workers_running` | This program's native jobs in starting/running phases, including work awaiting result delivery. |
+| `workers_retained` | All native job records still owned by this program, including completed or cancelling records pending release. Not a cumulative completion counter. |
+| `tasks`, `handlers` | Current cooperative tasks and registered block event handlers for this program. Legacy label watchers and OBS hotkeys are not counted as block handlers. |
+| `worlds`, `objects` | All retained 3D worlds and their object records in this engine instance. Imported mesh parts are individual objects. Does not count GPU allocations or pixel canvas buffers. |
+| `connections`, `peers` | Retained nonclosed connection endpoints and their current peer records in this program, across connection/network transports. Pending connections and failed endpoints can be included. |
+
+Compare samples under similar conditions after warm-up. Lua memory may rise
+between collections, and caches can grow initially before reaching steady use.
+Combine these counters with worker/mesh stage timings and actual frame intervals.
 
 ## Event handlers
 
@@ -2287,9 +2694,11 @@ This index covers the engine's public command families. `[…]` means optional; 
 
 | Command | Form / effect |
 | --- | --- |
+| `!ui` | Persistent `frame`/`panel`/`box`, `label`, `button`, `input`, `checkbox`, `slider`, `tabs`; named styles/CSS declarations, bindings, listeners, getters, and cleanup. See [UI controls](#ui-controls). |
 | `!input` | `press/release/hold \| key \| { ... }`, `off \| key/all`; also `key`, `mouse`, `pointer`, `recenter`, `wheel`, `focus`, `snapshot`, `keys`, `text`, `preview`, `preview_menu`, `viewport`; see [input](#input-and-timing). |
+| `!runtime` | `stats \| -> \| variable` or `stats \| into:variable`; read current Lua memory and worker/task/object/connection counts. See [runtime diagnostics](#runtime-diagnostics). |
 | `!events` | `off \| all`, or `off \| family \| [selector] \| [event_kind]`; remove block handlers. See [event handlers](#event-handlers). |
-| `!projector` | `fullscreen \| [monitor:index]`; open the current OBS Preview Projector fullscreen on a zero-based monitor index. |
+| `!projector` | `fullscreen \| [monitor:index]`; Windows `controls \| escape:game/default,exit_key:F11` and `close`; configurable game/projector keys and focused-projector closure. |
 | `!onpress` | `hotkey_name \| press_label \| [release_label]`; register an OBS hotkey and callbacks. |
 | `!start_task`, `!start_independent_task` | `label_or_block`; the independent form also accepts `-> \| task_name`. Cooperative tasks. Older `!run`/`!spawn` work. |
 | `!worker` | `expression/block/label \| result_name` or `expression/block/label \| -> \| result_name`; isolated native computation. `done/error/cancelled/finished \| job \| { ... }` register callbacks. `read`, `cancel`, `release`, and `clear \| scope/program` manage jobs. Older aliases remain compatible. |
@@ -2410,3 +2819,17 @@ The parser also recognizes `[[variable1,variable2]] [label] !command...` to watc
 - **`!use_sources` searches the active scene and uses exact names.** A source inside a nested scene/group may not match a direct scene item. Use `!renderer | create` for an engine renderer if it does not yet exist.
 - **Not every family uses named arguments.** A comma-separated `x:...,y:...` dictionary inside `!move` is one positional argument. `!canvas` field order flexibility applies to its named form specifically.
 - **External files are optional features.** A program can be one text file plus the engine. `!shader`, `!module`, `!include`, and `!fetch` intentionally read or contact things outside that file.
+
+## Troubleshooting
+
+| Symptom | Check |
+| --- | --- |
+| Nothing appears | Press **Execute**; check the active scene for the renderer name, then ensure the program calls `!canvas \| create` and `!canvas \| update`. The renderer name and buffer name must match. |
+| A source command fails | Match its name exactly and make it a direct item in the active scene. Missing names are logged with the scene name. |
+| Input is always zero | Focus OBS's main window on Windows or Linux/X11 and poll inside a frame loop. Check `focused` from `!input \| focus` or a snapshot. On macOS, direct polling is not implemented. |
+| Game animation looks slow while OBS FPS is fine | Check how often the program reaches `!canvas \| update` and `!wait \| frame`. Avoid redrawing a large static background pixel by pixel each frame. |
+| A loop stops with a runaway error | Add a deliberate `!wait \| frame` or make the loop terminate. A large command budget is not a substitute for yielding. |
+| A function seems to run immediately | `!fn` bodies are registered only. A `!label` body, however, lies in normal flow unless you jump around it. |
+| A sprite is blank or the wrong color | Check palette order, zero-based pixel indexes, decoded byte count, and the selected canvas. |
+| A worker result is missing | Check its `state`, keep OBS calls outside the worker, and wait/poll until completion. |
+| An effect or module file is missing | Use an absolute path or a path relative to the selected program in File mode; Text/Input mode uses the engine folder. |
