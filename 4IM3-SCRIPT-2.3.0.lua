@@ -376,7 +376,10 @@ function generate_stack_trace(src, thread_name, queue, labels, call_stack, curr_
         src.input_error_generation=(src.input_error_generation or 0)+1
         if src.current_task and src.current_task.input_binding then
             INPUT_EVENTS.cancel(src,src.current_task.input_binding)
-        elseif thread_name=='Main Execution Loop' then INPUT_EVENTS.clear(src) end
+        elseif thread_name=='Main Execution Loop' then
+            INPUT_EVENTS.clear(src)
+            if ENGINE_UI then ENGINE_UI.clear(src) end
+        end
     end
     obslua.script_log(obslua.LOG_WARNING, redact_network_credentials(trace))
 end
@@ -1328,6 +1331,8 @@ function compile_line(cmd, args)
                 if cmd=="connection" or cmd=="websocket" or cmd=="network" then
                     if ({addresses=true,invite=true,decode=true,send=true,receive=true,status=true})[action] then field="into" end
                 elseif cmd=="clipboard" and (action=="copy" or action=="paste") then field="into"
+                elseif cmd=="runtime" and action=="stats" then field="into"
+                elseif cmd=="ui" and (action=="get" or action=="value" or action=="state") then field="into"
                 elseif cmd=="physics" and action=="step" then field="into"
                 elseif cmd=="world3d" then
                     if ({list=true,get=true,bounds=true,snapshot=true,pick=true,import=true,
@@ -1532,6 +1537,7 @@ function compile_line(cmd, args)
     end
 
     -- fallback object method invocation
+    local widget_command
     return function(src, override_state)
         local dynamic_command=ANIM_LIB[cmd]
         if dynamic_command then
@@ -1542,6 +1548,10 @@ function compile_line(cmd, args)
         end
         if src.functions and src.functions[cmd] then
             return prepare_function_call(src, cmd, original_args)
+        end
+        if src.ui_state and src.ui_state.widgets[cmd] then
+            widget_command=widget_command or ENGINE_UI.compile_member(cmd,original_args)
+            return widget_command(src,override_state or src.state)
         end
         local items = src.active_sources or {src.scene_item}
         if #items == 0 then
@@ -4246,6 +4256,8 @@ local raymaze_source_info = {
     update = function(data, settings)
         data.width = math.max(1, obslua.obs_data_get_int(settings, "width"))
         data.height = math.max(1, obslua.obs_data_get_int(settings, "height"))
+        local frame=raymaze_frames[data.name]
+        if frame then frame.output_width,frame.output_height=data.width,data.height end
     end,
     get_width = function(data) return data.width end,
     get_height = function(data) return data.height end,
@@ -5745,7 +5757,12 @@ ANIM_LIB["renderer"] = function(ctx, state, args)
     obslua.obs_sceneitem_set_pos(item, position)
     obslua.obs_sceneitem_set_scale(item, size)
     if locked~=nil then obslua.obs_sceneitem_set_locked(item,locked) end
-    obslua.obs_source_release(scene_source)
+    if state and state._capture_ui_item then
+        -- Capture while the renderer already has its item. UI polling must
+        -- never find/enumerate scene items while holding OBS's Lua lock.
+        obslua.obs_sceneitem_addref(item)
+        state.ui_item,state.ui_scene,state.ui_scene_source=item,scene,scene_source
+    else obslua.obs_source_release(scene_source) end
     if kind == "3d" then
         if not world3d_worlds[name] then world3d_worlds[name] = world3d_new_world() end
         world3d_worlds[name].width, world3d_worlds[name].height = width, height
@@ -8579,6 +8596,8 @@ local raymaze_frontend_lib
 local input_preview_menu_control
 local input_ui_post_projector
 local input_ui_focus_preview
+local input_ui_projector_controls
+local input_projector_controls_command
 local function raymaze_mouse_window()
     if interaction_current and interaction_current.input_focused then
         return interaction_current
@@ -8667,7 +8686,7 @@ end
 local x11_keysyms = {
     UP=0xff52, DOWN=0xff54, LEFT=0xff51, RIGHT=0xff53,
     ENTER=0xff0d, SPACE=0x20, ESCAPE=0xff1b, TAB=0xff09,
-    BACKSPACE=0xff08, DELETE=0xffff, HOME=0xff50,
+    BACKSPACE=0xff08, DELETE=0xffff, HOME=0xff50, END=0xff57,
     SHIFT=0xffe1, CTRL=0xffe3, ALT=0xffe9,
     NUMPAD_MULTIPLY=0xffaa, NUMPAD_ADD=0xffab, NUMPAD_SEPARATOR=0xffac,
     NUMPAD_SUBTRACT=0xffad, NUMPAD_DECIMAL=0xffae, NUMPAD_DIVIDE=0xffaf,
@@ -8883,11 +8902,25 @@ function input_host.client_position(handle, x, y)
     return tonumber(point.x), tonumber(point.y)
 end
 local function input_viewport_coordinates(px,py,area_width,area_height,
-                                          source_width,source_height)
-    if not area_width or area_width<=0 or area_height<=0 then return nil end
-    local scale=math.min(area_width/source_width,area_height/source_height)
-    local left=(area_width-source_width*scale)/2
-    local top=(area_height-source_height*scale)/2
+                                          source_width,source_height,edge)
+    if not area_width or not area_height or not source_width or not source_height or
+       source_width<=0 or source_height<=0 then return nil end
+    edge=edge or 0
+    area_width,area_height=area_width-edge*2,area_height-edge*2
+    if area_width<=0 or area_height<=0 then return nil end
+    -- Match OBS GetScaleAndCenterPos, including its integer centering. The
+    -- main preview reserves PREVIEW_EDGE_SIZE (10 physical pixels); Interact
+    -- and projectors fit their whole display and must not inherit that inset.
+    local scale,draw_width,draw_height
+    if area_width/area_height>source_width/source_height then
+        scale=area_height/source_height
+        draw_width,draw_height=math.floor(area_height*source_width/source_height),area_height
+    else
+        scale=area_width/source_width
+        draw_width,draw_height=area_width,math.floor(area_width*source_height/source_width)
+    end
+    local left=edge+math.floor(area_width/2)-math.floor(draw_width/2)
+    local top=edge+math.floor(area_height/2)-math.floor(draw_height/2)
     local x=(px-left)/scale
     local y=(py-top)/scale
     if x<0 or y<0 or x>=source_width or y>=source_height then return nil end
@@ -8927,8 +8960,10 @@ local function input_windows_preview_projector(main_window, foreground)
     return ffi.string(utf8,bytes)==projector_title .. " - " .. preview_title
 end
 local function projector_command(ctx,state,args)
+    local action=tostring(args[1] or ""):lower()
+    if action=="controls" or action=="close" then return input_projector_controls_command(ctx,args) end
     if tostring(args[1] or ""):lower() ~= "fullscreen" then
-        return false,"Projector Error: Expected !projector | fullscreen | monitor:0 |+|"
+        return false,"Projector Error: Expected fullscreen | monitor:0, controls | escape:game/default | exit_key:F11, or close"
     end
     local monitor,seen=0,false
     for i=2,#args do
@@ -9055,13 +9090,23 @@ local function input_windows_scene_preview(handle,width,height)
     local main_height=tonumber(main_bounds.bottom-main_bounds.top)
     local area_width=tonumber(preview_bounds.right-preview_bounds.left)
     local area_height=tonumber(preview_bounds.bottom-preview_bounds.top)
-    -- OBS's native preview occupies a substantial part of the main window.
-    -- Reject docks and controls so clicking them cannot edit the model.
+    if ffi.C.ScreenToClient(child,point)==0 then return nil,nil,true end
+    if input_host and input_host.preview_geometry then
+        local geometry,available=input_host.preview_geometry(child,width,height)
+        if available then
+            if not geometry or geometry.area_width~=area_width or geometry.area_height~=area_height then return nil,nil,true,handle end
+            local x=(tonumber(point.x)-geometry.left)/geometry.scale
+            local y=(tonumber(point.y)-geometry.top)/geometry.scale
+            if x<0 or y<0 or x>=width or y>=height then return nil,nil,true,handle end
+            return x,y,true,handle
+        end
+    end
+    -- Older OBS/Qt builds without preview metadata retain fit-to-window
+    -- polling. Reject docks and controls in that fallback path.
     if area_width<math.max(160,main_width*0.35) or
        area_height<math.max(90,main_height*0.25) then return nil,nil,true end
-    if ffi.C.ScreenToClient(child,point)==0 then return nil,nil,true end
     local x,y=input_viewport_coordinates(tonumber(point.x),tonumber(point.y),
-        area_width,area_height,width,height)
+        area_width,area_height,width,height,10)
     return x,y,true,handle
 end
 local function input_x11_viewport(name,width,height)
@@ -9207,8 +9252,16 @@ function input_host.recenter_pointer(ctx,sample)
     if not window or window==ffi.NULL then return result end
     local bounds=ffi.new("RECT")
     if ffi.C.GetClientRect(window,bounds)==0 then return result end
-    local scale=math.min(tonumber(bounds.right-bounds.left)/viewport.width,
-                         tonumber(bounds.bottom-bounds.top)/viewport.height)
+    local geometry
+    if ctx.input_preview and ctx.input_active_window==ctx.input_window and input_host.preview_geometry then
+        local available
+        geometry,available=input_host.preview_geometry(window,viewport.width,viewport.height)
+        if available and not geometry then return result end
+    end
+    local edge=ctx.input_preview and ctx.input_active_window==ctx.input_window and 10 or 0
+    local scale=math.min((tonumber(bounds.right-bounds.left)-edge*2)/viewport.width,
+                         (tonumber(bounds.bottom-bounds.top)-edge*2)/viewport.height)
+    if geometry then scale=geometry.scale end
     if scale<=0 then return result end
     local x,y=viewport.width/2,viewport.height/2
     if not input_host.focused(ctx.input_active_window) then return result end
@@ -9224,7 +9277,7 @@ end
 local input_codes = {
     UP=0x26, DOWN=0x28, LEFT=0x25, RIGHT=0x27,
     ENTER=0x0D, SPACE=0x20, ESCAPE=0x1B, TAB=0x09, BACKSPACE=0x08,
-    DELETE=0x2E, HOME=0x24,
+    DELETE=0x2E, HOME=0x24, END=0x23,
     SHIFT=0x10, CTRL=0x11, ALT=0x12,
     NUMPAD_MULTIPLY=0x6A, NUMPAD_ADD=0x6B, NUMPAD_SEPARATOR=0x6C,
     NUMPAD_SUBTRACT=0x6D, NUMPAD_DECIMAL=0x6E, NUMPAD_DIVIDE=0x6F,
@@ -9330,6 +9383,7 @@ local function input_poll(ctx, requested, include_pointer)
     end
     local previous=ctx.input_previous or {}
     local blocked=ctx.input_blocked or {}
+    local physical_previous=ctx.input_mouse_physical or {}
     local focus_was=ctx.input_focused==true
     local inside_was=ctx.input_mouse_inside==true
     local states={}
@@ -9337,29 +9391,149 @@ local function input_poll(ctx, requested, include_pointer)
         local name=input_name(raw)
         if not name then return nil,"Unknown input key '"..tostring(raw).."'" end
         local mouse_key=name:sub(1,6)=="MOUSE_"
+        local physical=mouse_key and input_host.key_down(input_codes[name],name) or false
         local down=focused and (not mouse_key or inside) and
-            input_host.key_down(input_codes[name], name) or false
+            (mouse_key and physical or not mouse_key and input_host.key_down(input_codes[name],name)) or false
         local was_down=previous[name]==true
         if down and (previous[name]==nil or not focus_was or
                      (mouse_key and not inside_was)) then
-            blocked[name]=true
+            -- A fresh mouse press can itself focus the preview/projector.
+            -- Suppress buttons already held outside, but accept a known up->down
+            -- transition inside. Keyboard focus-regain behavior stays unchanged.
+            blocked[name]=not (mouse_key and physical_previous[name]==false) or nil
         elseif not down then
             blocked[name]=nil
         end
+        if mouse_key and physical and ctx.input_mouse_sampler and
+           ctx.input_mouse_sampler.input_blocked[name] then blocked[name]=true end
         states[name]={down=down,pressed=down and not was_down and not blocked[name],
                       released=not down and was_down}
+        if mouse_key then
+            if host_os=="Windows" or focused then physical_previous[name]=physical
+            else physical_previous[name]=nil end
+            if not ctx._input_sampling and not ctx.input_event_owner then
+                ctx.input_watched_mouse=ctx.input_watched_mouse or {}
+                ctx.input_watched_mouse[name]=true
+                local pending=ctx.input_pending_mouse and ctx.input_pending_mouse[name]
+                local active=viewport_window or handle
+                if pending and focused and pending.window==active then
+                    states[name].pressed=states[name].pressed or pending.pressed
+                    states[name].released=states[name].released or pending.released
+                    if pending.pressed then
+                        states[name].pressed_x,states[name].pressed_y=pending.x,pending.y
+                    end
+                end
+                if ctx.input_pending_mouse then ctx.input_pending_mouse[name]=nil end
+                if states[name].pressed and not states[name].pressed_x then
+                    states[name].pressed_x,states[name].pressed_y=x,y
+                end
+                -- A command can sample after the tick's background sample. Keep
+                -- that sampler aligned so the same press is never replayed.
+                local sampler=ctx.input_mouse_sampler
+                if sampler then
+                    sampler.input_previous[name]=down
+                    sampler.input_blocked[name]=blocked[name]
+                    sampler.input_mouse_physical[name]=physical
+                    sampler.input_focused,sampler.input_mouse_inside=focused,inside
+                end
+            end
+        end
         previous[name]=down
     end
     ctx.input_previous=previous
     ctx.input_blocked=blocked
+    ctx.input_mouse_physical=physical_previous
     ctx.input_focused=focused
     ctx.input_active_window=focused and (viewport_window or handle) or nil
+    if ctx.input_projector_controls and viewport_window and focused and
+       ctx.input_projector_last_window~=viewport_window then
+        local controls=ctx.input_projector_controls
+        local ok=input_ui_projector_controls(controls.key,controls.escape)
+        if ok then ctx.input_projector_last_window=viewport_window end
+    end
     if include_pointer~=false then ctx.input_mouse_inside=inside end
     return {focused=focused,mouse_inside=inside,x=x,y=y,keys=states,
             interaction_source=handle==interaction_current and handle and
                 handle.name or (ctx.input_preview and inside and
                 "ScenePreview" or (ctx.input_viewport and inside and
                 ctx.input_viewport.name or ""))}
+end
+-- Sample registered mouse buttons each OBS tick even when the user's next
+-- snapshot is delayed by script work. Coalesce at most one press/release per
+-- button, with its original canvas coordinates; never retain input off focus.
+function input_host.sample_pending(ctx)
+    if not next(ctx.input_watched_mouse or {}) then return true end
+    local binding=ctx.input_preview or ctx.input_viewport or ctx.input_window
+    local sampler=ctx.input_mouse_sampler
+    if not sampler or sampler.binding~=binding then
+        sampler={_input_sampling=true,binding=binding,input_window=ctx.input_window,
+            input_previous={},input_blocked={},input_mouse_physical={}}
+        for name in pairs(ctx.input_watched_mouse) do
+            sampler.input_previous[name]=(ctx.input_previous or {})[name]
+            sampler.input_blocked[name]=(ctx.input_blocked or {})[name]
+            sampler.input_mouse_physical[name]=(ctx.input_mouse_physical or {})[name]
+        end
+        sampler.input_focused,sampler.input_mouse_inside=ctx.input_focused,ctx.input_mouse_inside
+        ctx.input_mouse_sampler=sampler;ctx.input_pending_mouse={}
+    end
+    sampler.input_preview,sampler.input_viewport=ctx.input_preview,ctx.input_viewport
+    local names={};for name in pairs(ctx.input_watched_mouse) do names[#names+1]=name end
+    local sample,err=input_poll(sampler,names,true)
+    if not sample then return false,"Input Error: "..tostring(err) end
+    if not sample.focused then ctx.input_pending_mouse={};return true end
+    for name,state in pairs(sample.keys) do
+        local pending=ctx.input_pending_mouse[name]
+        if pending and pending.window~=sampler.input_active_window then pending=nil;ctx.input_pending_mouse[name]=nil end
+        if state.pressed or state.released then
+            pending=pending or {window=sampler.input_active_window}
+            if state.pressed and not pending.pressed then pending.x,pending.y=sample.x,sample.y end
+            pending.pressed=pending.pressed or state.pressed
+            pending.released=pending.released or state.released
+            ctx.input_pending_mouse[name]=pending
+        end
+    end
+    return true
+end
+function input_host.clear_pending(ctx)
+    ctx.input_watched_mouse=nil;ctx.input_pending_mouse=nil;ctx.input_mouse_sampler=nil
+    ctx.input_previous=nil;ctx.input_blocked=nil;ctx.input_mouse_physical=nil
+    ctx.input_focused=false;ctx.input_mouse_inside=false
+end
+input_projector_controls_command=function(ctx,args)
+    local action=tostring(args[1]):lower()
+    if host_os~="Windows" then return false,"Projector Error: Projector key controls currently require Windows OBS" end
+    if action=="close" then
+        if #args~=1 then return false,"Projector Error: close takes no attributes and closes only the focused Preview Projector" end
+        local ok,why=input_ui_projector_controls(0,0,true)
+        return ok,not ok and ("Projector Error: "..tostring(why)) or nil
+    end
+    local fields={}
+    for i=2,#args do
+        local parts,why=split_named_attribute_group(tostring(args[i]))
+        if not parts then return false,"Projector Error: "..tostring(why) end
+        for _,part in ipairs(parts) do
+            local key,value=part:match("^%s*([%w_]+)%s*:%s*(.-)%s*$")
+            if (key~="escape" and key~="exit_key") or value=="" or fields[key] then
+                return false,"Projector Error: controls accepts escape:game/default and exit_key:key/none"
+            end
+            fields[key]=value
+        end
+    end
+    local mode=(fields.escape or "game"):lower()
+    if mode~="game" and mode~="default" then return false,"Projector Error: escape must be game or default" end
+    local raw=fields.exit_key or "F11"
+    if not input_name(raw) and raw:lower()~="none" then
+        local value=resolve_path(ctx,raw)
+        if type(value)=="string" then raw=value end
+    end
+    local exit_name=raw:lower()=="none" and "none" or input_name(raw)
+    if not exit_name or exit_name:sub(1,6)=="MOUSE_" then return false,"Projector Error: exit_key must name a keyboard key, or none" end
+    if exit_name=="ESCAPE" and mode=="game" then return false,"Projector Error: Esc cannot both stay in the game and exit the projector" end
+    local code=exit_name=="none" and 0 or input_codes[exit_name]
+    local ok,why=input_ui_projector_controls(code,mode=="game" and 1 or 0)
+    if not ok then return false,"Projector Error: "..tostring(why) end
+    ctx.input_projector_controls=(mode=="game" or code~=0) and {key=code,escape=mode=="game" and 1 or 0} or nil
+    return true
 end
 
 -- Program-owned input handlers use an independent polling history, so they
@@ -9395,6 +9569,7 @@ function INPUT_EVENTS.is_handler(cmd,args)
         return block and ({message=true,connected=true,disconnected=true,error=true,join=true,leave=true})[action]
     elseif cmd=='world3d' then return ({ready=true,prepared=true,error=true,cancelled=true,animation_done=true})[action]
     elseif cmd=='animation' then return action=='done' end
+    if cmd=='ui' then return action=='on' or ENGINE_UI and ENGINE_UI.events[action] and block end
 end
 function INPUT_EVENTS.selector(raw)
     local text=safe_trim(raw or '')
@@ -9421,6 +9596,10 @@ function INPUT_EVENTS.compile(ctx,args,line,command,cmd)
     elseif cmd=='collision' then
         code.kind='collision';code.target=args[1];code.other=args[2]
         code.key=tostring(code.target)..'|'..tostring(code.other);valid=valid and #args==3
+    elseif cmd=='ui' then
+        code.kind=action=='on' and args[3] or action
+        code.key=INPUT_EVENTS.selector(args[2]);code.target=code.key
+        valid=valid and #args==(action=='on' and 4 or 3) and code.key~='' and ENGINE_UI.events[code.kind]
     else
         code.key=INPUT_EVENTS.selector(args[2]);code.target=code.key
         valid=valid and #args==3 and code.key~=''
@@ -9535,6 +9714,7 @@ function INPUT_EVENTS.dispatch(ctx,binding)
     ctx.async_tasks=ctx.async_tasks or {};ctx.async_tasks[#ctx.async_tasks+1]=task
 end
 function INPUT_EVENTS.enabled(ctx,kind)
+    if kind=='text' and ctx.ui_state then return true end
     for _,b in pairs(ctx.input_handlers or {}) do
         if b.code.family=='input' and b.code.kind==kind then return true end
     end
@@ -9556,11 +9736,11 @@ function INPUT_EVENTS.stream(ctx,kind,value)
     return result
 end
 function INPUT_EVENTS.poll(ctx,seconds,deadline)
-    if not next(ctx.input_handlers or {}) then return true end
+    if not next(ctx.input_handlers or {}) and not ctx.ui_state then return true end
     local bindings,inputs,requested,seen={},{},{},{}
     local pointer=false
     local alive={};for _,task in ipairs(ctx.async_tasks or {}) do alive[task]=not task.cancelled end
-    for _,binding in pairs(ctx.input_handlers) do
+    for _,binding in pairs(ctx.input_handlers or {}) do
         bindings[#bindings+1]=binding
         if binding.task and not alive[binding.task] then binding.task=nil end
         local code=binding.code
@@ -9572,7 +9752,13 @@ function INPUT_EVENTS.poll(ctx,seconds,deadline)
     end
     table.sort(bindings,function(a,b) return a.serial<b.serial end)
     local dt=math.max(0,tonumber(seconds) or 0)
-    if #inputs>0 then
+    if ctx.ui_state then
+        for _,key in ipairs(ENGINE_UI.keys) do
+            if not seen[key] then requested[#requested+1]=key;seen[key]=true end
+        end
+        pointer=true
+    end
+    if #inputs>0 or ctx.ui_state then
         local history=ctx.input_event_poll or {};ctx.input_event_poll=history
         history.input_window=ctx.input_window or history.input_window;history.input_preview=ctx.input_preview;history.input_viewport=ctx.input_viewport
         history.input_event_owner=ctx
@@ -9591,6 +9777,11 @@ function INPUT_EVENTS.poll(ctx,seconds,deadline)
             local ok,why=ANIM_LIB.input(history,{}, {'text','_event_text'})
             if not ok then return false,why end
             text=history.active_scope._event_text
+        end
+        if ctx.ui_state then
+            local ui_sample,why=ENGINE_UI.scene_sample(ctx,sample)
+            if not ui_sample then return false,why end
+            ENGINE_UI.poll(ctx,ui_sample,text,dt)
         end
         for _,binding in ipairs(inputs) do
             local code=binding.code;local state=sample.keys[code.key]
@@ -9617,6 +9808,7 @@ function INPUT_EVENTS.poll(ctx,seconds,deadline)
             elseif code.kind=='hold' then binding.pending=nil end
         end
     end
+    if #bindings==0 then return true end
     local first=(ctx.event_cursor or 0)%#bindings+1
     for offset=0,#bindings-1 do
         local index=(first+offset-1)%#bindings+1;local binding=bindings[index]
@@ -9635,12 +9827,12 @@ function INPUT_EVENTS.off(ctx,family,key,kind)
     end
     local input_remains=false
     for _,binding in pairs(ctx.input_handlers or {}) do if binding.code.family=='input' then input_remains=true;break end end
-    if not input_remains then ctx.input_event_streams=nil;ctx.input_event_poll=nil end
+    if not input_remains and not ctx.ui_state then ctx.input_event_streams=nil;ctx.input_event_poll=nil end
 end
 ANIM_LIB.events=function(ctx,state,args)
     local family=tostring(args[2] or '')
     if args[1]~='off' or #args<2 or #args>4 or
-       not ({all=true,input=true,worker=true,connection=true,world3d=true,animation=true,change=true,collision=true})[family] then
+       not ({all=true,input=true,worker=true,connection=true,world3d=true,animation=true,change=true,collision=true,ui=true})[family] then
         return false,'Event Error: Expected events | off | all, or off | family | optional selector | optional event kind'
     end
     if family=='all' and #args~=2 then return false,'Event Error: off | all takes no selector' end
@@ -9920,6 +10112,11 @@ ANIM_LIB["input"] = function(ctx,state,args)
             values[name]=key_state.down and 1 or 0
             values[name.."_pressed"]=key_state.pressed and 1 or 0
             values[name.."_released"]=key_state.released and 1 or 0
+            if name:sub(1,6)=="MOUSE_" then
+                values[name.."_pressed_inside"]=key_state.pressed_x and 1 or 0
+                values[name.."_pressed_x"]=key_state.pressed_x or -1
+                values[name.."_pressed_y"]=key_state.pressed_y or -1
+            end
         end
         local written=update_variable_state(ctx,tostring(args[2]),values)
         if type(written)=="table" and written._is_fatal_error then return false,written.msg end
@@ -9973,6 +10170,7 @@ local canvas_font = {
 -- A wider 5x7 face for menus. The original 3x5 face remains the default so
 -- existing scripts keep their spacing and appearance.
 local canvas_readable_font = {
+ ["*"]={"00000","10101","01110","11111","01110","10101","00000"},
  A={"01110","10001","10001","11111","10001","10001","10001"},
  B={"11110","10001","10001","11110","10001","10001","11110"},
  C={"01111","10000","10000","10000","10000","10000","01111"},
@@ -10168,6 +10366,7 @@ ANIM_LIB["canvas"] = function(ctx,state,args)
     end
     local context_key=ctx.context_id or 0
     local function active_pixel_item(name)
+        if state and state._ui_name==name and state._ui_item then return state._ui_item end
         local scene_source=obslua.obs_frontend_get_current_scene()
         local scene=scene_source and obslua.obs_scene_from_source(scene_source)
         local item=scene and obslua.obs_scene_find_source(scene,name)
@@ -10721,7 +10920,849 @@ ANIM_LIB["animation"] = function(ctx, state, args)
     return false, "Animation Error: Expected create or draw"
 end
 
+-- Retained, program-owned controls. A UI owns a separate transparent pixel
+-- canvas, so redrawing controls never clears a game's canvas or 3D scene.
+ENGINE_UI={keys={'MOUSE_LEFT','TAB','ENTER','SPACE','LEFT','RIGHT','HOME','END','DELETE','BACKSPACE','SHIFT','CTRL','A','C','V','X'},
+    kinds={panel=true,label=true,button=true,input=true,checkbox=true,slider=true,tabs=true},
+    events={click=true,press=true,release=true,mouse_enter=true,mouse_leave=true,change=true,submit=true,focus=true,blur=true},
+    defaults={background='#172334',hover_color='#294259',pressed_color='#375874',
+        text_color='#EDF4FF',accent='#55C8E8',disabled_color='#566174',border_color='#34485F',
+        border_width=1,radius=6,scale=2,padding=10},
+    numbers={x=true,y=true,width=true,height=true,scale=true,font_size=true,padding=true,radius=true,border_width=true,min=true,max=true,step=true,max_length=true,tab=true},
+    booleans={visible=true,enabled=true,checked=true,password=true},
+    colors={background=true,hover_color=true,pressed_color=true,text_color=true,accent=true,disabled_color=true,border_color=true},
+    strings={text=true,placeholder=true,value=true},
+    words={name=true,parent=true,bind=true,font=true,style=true,tabs=true},
+    aliases={color='text_color',background_color='background',hover='hover_color',pressed='pressed_color',
+        border_radius='radius',font_family='font',font_scale='scale'}}
+function ENGINE_UI.attributes(ctx,args,first,allowed)
+    local result,expanded={},{}
+    for i=first,#args do
+        local parts,err=split_named_attribute_group(tostring(args[i]))
+        if not parts then return nil,err end
+        for _,part in ipairs(parts) do
+            local css=part:match('^%s*css%s*:%s*(.+)$')
+            if css then
+                local value=resolve_path(ctx,css)
+                if type(value)~='string' then return nil,'css must be a quoted declaration string or string variable' end
+                for declaration in (value..';'):gmatch('(.-);') do
+                    if safe_trim(declaration)~='' then
+                        local key,raw=declaration:match('^%s*([%w_%-]+)%s*:%s*(.-)%s*$')
+                        if not key or raw=='' then return nil,'Invalid CSS declaration: '..declaration end
+                        key=key:lower():gsub('%-','_');key=ENGINE_UI.aliases[key] or key
+                        if ENGINE_UI.colors[key] then raw=string.format('%q',raw)
+                        elseif ENGINE_UI.numbers[key] then raw=raw:gsub('px$','') end
+                        expanded[#expanded+1]=key..':'..raw
+                    end
+                end
+            else expanded[#expanded+1]=part end
+        end
+    end
+    for _,part in ipairs(expanded) do
+            local key,raw=part:match('^%s*([%w_]+)%s*:%s*(.-)%s*$')
+            key=ENGINE_UI.aliases[key] or key
+            if key=='font_size' then
+                local size=evaluate_math(ctx,raw)
+                if type(size)~='number' or size~=size or size<1 or size>112 then return nil,'font_size must be from 1 to 112 pixels' end
+                key,raw='scale',tostring(math.max(1,math.floor(size/7+.5)))
+            end
+            if not key or not allowed[key] or result[key]~=nil or raw=='' then
+                return nil,'Unknown, duplicate, or empty attribute: '..tostring(key or part)
+            end
+            local value
+            if key=='items' then
+                local value=(raw:sub(1,1)=='[' or raw:sub(1,1)=='{') and parse_table_literal(ctx,raw) or resolve_path(ctx,raw)
+                if type(value)~='table' or is_fatal(value) or #value==0 then return nil,'items must be a nonempty list of tab captions' end
+                local count=0;for k,item in pairs(value) do
+                    if type(k)~='number' or k%1~=0 or k<1 or k>#value or type(item)~='string' then return nil,'items must be a dense list of text captions' end
+                    count=count+1
+                end
+                if count~=#value then return nil,'items must be a dense list' end
+                value={unpack(value)}
+                result[key]=value
+            elseif ENGINE_UI.numbers[key] then
+                value=evaluate_math(ctx,raw)
+                if type(value)~='number' or value~=value or math.abs(value)==math.huge then return nil,key..' must be a finite number' end
+            elseif ENGINE_UI.booleans[key] then
+                if raw=='true' or raw=='1' then value=true elseif raw=='false' or raw=='0' then value=false
+                else value=resolve_path(ctx,raw);if is_fatal(value) then return nil,value.msg end
+                    if value~=true and value~=false and value~=0 and value~=1 then return nil,key..' must be true or false' end
+                    value=value==true or value==1
+                end
+            elseif ENGINE_UI.words[key] or key=='into' then
+                value=raw:match('^"(.*)"$') or raw:match("^'(.*)'$") or raw
+            else
+                value=resolve_path(ctx,raw)
+                if is_fatal(value) then return nil,value.msg end
+                if type(value)~='string' and type(value)~='number' then return nil,key..' must be text or a number' end
+                if ENGINE_UI.colors[key] then
+                    if not tostring(value):match('^#%x%x%x%x%x%x$') then return nil,key..' must be a quoted #RRGGBB color' end
+                else value=tostring(value) end
+            end
+            if key~='items' then result[key]=value end
+    end
+    return result
+end
+function ENGINE_UI.color(value)
+    local r,g,b=value:match('^#(%x%x)(%x%x)(%x%x)$')
+    return tonumber(r,16)+tonumber(g,16)*256+tonumber(b,16)*65536+255*16777216
+end
+function ENGINE_UI.characters(text)
+    local chars={}
+    -- Keep UTF-8 code points intact when moving/deleting. The built-in canvas
+    -- font still has the same limited glyph coverage as !canvas | text.
+    for char in tostring(text):gmatch('[%z\1-\127\194-\244][\128-\191]*') do chars[#chars+1]=char end
+    return chars
+end
+function ENGINE_UI.allowed(kind)
+    local fields={x=true,y=true,width=true,height=true,visible=true,enabled=true,parent=true,font=true,
+        scale=true,padding=true,background=true,hover_color=true,pressed_color=true,text_color=true,accent=true,
+        disabled_color=true,border_color=true,border_width=true,radius=true,style=true,tabs=true,tab=true}
+    if kind=='button' or kind=='label' or kind=='checkbox' then fields.text=true end
+    if kind=='input' then fields.value=true;fields.placeholder=true;fields.password=true;fields.max_length=true;fields.bind=true end
+    if kind=='checkbox' then fields.checked=true;fields.bind=true end
+    if kind=='slider' then fields.value=true;fields.min=true;fields.max=true;fields.step=true;fields.bind=true end
+    if kind=='tabs' then fields.items=true;fields.value=true;fields.bind=true end
+    return fields
+end
+function ENGINE_UI.validate(w)
+    if w.width<=0 or w.height<=0 then return 'width and height must be positive' end
+    if w.scale<1 or w.scale>16 or w.scale%1~=0 then return 'scale must be a whole number from 1 to 16' end
+    if w.padding<0 then return 'padding cannot be negative' end
+    if w.radius<0 or w.border_width<0 then return 'radius and border_width cannot be negative' end
+    if w.font~='readable' and w.font~='pixel' then return 'font must be readable or pixel' end
+    if w.kind=='input' and (w.max_length<1 or w.max_length%1~=0) then return 'max_length must be a positive whole number' end
+    if w.kind=='slider' and (w.max<=w.min or w.step<=0) then return 'slider needs max greater than min and step greater than zero' end
+    if w.kind=='slider' and w.max-w.min==math.huge then return 'slider range must have finite length' end
+    if w.kind=='tabs' and not w.items then return 'tabs needs items:["First","Second"]' end
+    if w.bind and not w.bind:match('^[A-Za-z_][%w_]*$') then return 'bind must be a simple variable name' end
+end
+function ENGINE_UI.normalize(w,value)
+    if w.kind=='input' then
+        local chars=ENGINE_UI.characters(tostring(value or ''):gsub('[\r\n\t]',' '):gsub('[%z\1-\8\11\12\14-\31\127]',''))
+        return table.concat(chars,'',1,math.min(#chars,w.max_length))
+    elseif w.kind=='checkbox' then return value==true or value==1 or value=='1'
+    elseif w.kind=='tabs' then
+        value=tonumber(value)
+        if not value or value%1~=0 or value<1 or value>#w.items then return nil end
+        return value
+    elseif w.kind=='slider' then
+        value=tonumber(value)
+        if not value or value~=value or math.abs(value)==math.huge then return nil end
+        return math.max(w.min,math.min(w.max,w.min+math.floor((value-w.min)/w.step+.5)*w.step))
+    end
+end
+function ENGINE_UI.value(w)
+    if w.kind=='checkbox' then return w.checked and 1 or 0 end
+    return w.value
+end
+function ENGINE_UI.emit(ctx,w,kind,extra)
+    local binding=ctx.input_handlers and ctx.input_handlers['ui:'..w.name..':'..kind]
+    if not binding then return end
+    local event={kind=kind,name=w.name,value=ENGINE_UI.value(w),text=w.kind=='input' and w.value or w.items and w.items[w.value] or w.text,
+        checked=w.checked and 1 or 0,x=w.mx or w.ax,y=w.my or w.ay,dt=ctx.ui_state and ctx.ui_state.dt or 0}
+    for key,value in pairs(extra or {}) do event[key]=value end
+    INPUT_EVENTS.emit(binding,event)
+end
+function ENGINE_UI.write(ctx,w,value,notify)
+    value=ENGINE_UI.normalize(w,value)
+    if value==nil then return false,'Invalid value for '..w.name end
+    local old=w.value;if w.kind=='checkbox' then old=w.checked end
+    if w.kind=='checkbox' then w.checked=value else w.value=value end
+    if w.bind then
+        local previous=ctx.active_scope;ctx.active_scope=w.scope
+        local result=update_variable_state(ctx,w.bind,ENGINE_UI.value(w))
+        ctx.active_scope=previous
+        if is_fatal(result) then return false,result.msg end
+    end
+    if old~=value then
+        w.surface.dirty=true
+        if notify then ENGINE_UI.emit(ctx,w,'change',{old_value=w.kind=='checkbox' and (old and 1 or 0) or old}) end
+    end
+    return true
+end
+function ENGINE_UI.sync(ctx)
+    local state=ctx.ui_state;if not state then return end
+    for _,w in ipairs(state.order) do
+        if w.bind then
+            local value=w.scope[w.bind]
+            if value~=nil then
+                local normalized=ENGINE_UI.normalize(w,value)
+                if normalized~=nil then
+                    local current=w.value;if w.kind=='checkbox' then current=w.checked end
+                    if current~=normalized then
+                        if w.kind=='checkbox' then w.checked=normalized else w.value=normalized end
+                        w.caret=#ENGINE_UI.characters(tostring(w.value or ''));w.anchor=w.caret;w.surface.dirty=true
+                    end
+                    local exposed=w.kind=='checkbox' and (normalized and 1 or 0) or normalized
+                    if value~=exposed then ENGINE_UI.write(ctx,w,normalized,false) end
+                end
+            end
+        end
+    end
+end
+function ENGINE_UI.layout(ctx)
+    local state=ctx.ui_state;if not state then return end
+    for _,w in ipairs(state.order) do
+        local p=w.parent and state.widgets[w.parent]
+        w.ax,w.ay=w.x+(p and p.ax or 0),w.y+(p and p.ay or 0)
+        local tabs=w.tabs and state.widgets[w.tabs]
+        w.shown=w.visible and w.surface.visible and (not p or p.shown) and (not w.tabs or tabs and tabs.shown and tabs.value==w.tab)
+        w.active=w.enabled and (not p or p.active)
+        w.clip={math.max(w.ax,p and p.clip[1] or 0),math.max(w.ay,p and p.clip[2] or 0),
+            math.min(w.ax+w.width,p and p.clip[3] or w.surface.width),
+            math.min(w.ay+w.height,p and p.clip[4] or w.surface.height)}
+    end
+    if state.focus and (not state.focus.shown or not state.focus.active) then ENGINE_UI.focus(ctx,nil) end
+    if state.capture and (not state.capture.shown or not state.capture.active) then state.capture=nil end
+    if state.hover and not state.hover.shown then state.hover=nil end
+    state.keyboard_captured=state.focus~=nil
+end
+function ENGINE_UI.focus(ctx,w)
+    local state=ctx.ui_state;if not state or state.focus==w then return end
+    local old=state.focus;state.focus=w
+    if old then old.surface.dirty=true;ENGINE_UI.emit(ctx,old,'blur') end
+    if w then w.surface.dirty=true;ENGINE_UI.emit(ctx,w,'focus') end
+end
+function ENGINE_UI.apply_style(w,ui)
+    local p=w.parent and ui.widgets[w.parent]
+    for key,value in pairs(ENGINE_UI.defaults) do w[key]=p and p[key] or value end
+    w.font=p and p.font or 'readable'
+    for key,value in pairs(w.style and ui.styles[w.style] or {}) do w[key]=value end
+    for key,value in pairs(w.inline or {}) do w[key]=value end
+end
+function ENGINE_UI.restyle(ui)
+    for _,w in ipairs(ui.order) do ENGINE_UI.apply_style(w,ui);w.surface.dirty=true end
+end
+function ENGINE_UI.clipboard(ctx,action,text)
+    local previous=ctx.active_scope;ctx.active_scope={}
+    local args={action,'into:_ui_clipboard'}
+    if action=='copy' then args[#args+1]='text:'..string.format('%q',text) end
+    local ok,why=ANIM_LIB.clipboard(ctx,{},args)
+    local result=ctx.active_scope._ui_clipboard;ctx.active_scope=previous
+    return ok and result or {ok=0,error=tostring(why)}
+end
+function ENGINE_UI.edit(ctx,w,text)
+    local chars=ENGINE_UI.characters(w.value);local low,high=math.min(w.caret,w.anchor),math.max(w.caret,w.anchor)
+    local insert=ENGINE_UI.characters(text)
+    local room=math.max(0,w.max_length-(#chars-(high-low)))
+    local result={}
+    for i=1,low do result[#result+1]=chars[i] end
+    for i=1,math.min(room,#insert) do result[#result+1]=insert[i] end
+    for i=high+1,#chars do result[#result+1]=chars[i] end
+    w.caret=low+math.min(room,#insert);w.anchor=w.caret
+    ENGINE_UI.write(ctx,w,table.concat(result),true);w.surface.dirty=true
+end
+function ENGINE_UI.scene_sample(ctx,sample)
+    if interaction_current and interaction_current.input_focused then return sample end
+    local surface=ctx.ui_state.surfaces[1]
+    local width,height=surface.scene_width,surface.scene_height
+    if ctx.input_preview and ctx.input_preview.width==width and ctx.input_preview.height==height then return sample end
+    -- Gameplay may sample a different viewport. UI hit testing always starts
+    -- in the current scene, with independent button history and no text read.
+    local state=ctx.ui_state;local history=state.pointer_history or {};state.pointer_history=history
+    history.input_window=ctx.input_window;history.input_preview={width=width,height=height};history.input_viewport=nil
+    history.input_event_owner=ctx
+    local result,why=input_poll(history,ENGINE_UI.keys,true)
+    if not result then return nil,'Input Error: '..tostring(why) end
+    result._ui_window=history.input_active_window
+    return result
+end
+function ENGINE_UI.inverse_point(matrix,x,y)
+    local a,b,c,d=matrix.x.x,matrix.y.x,matrix.x.y,matrix.y.y
+    local determinant=a*d-b*c
+    if determinant==0 or determinant~=determinant or math.abs(determinant)==math.huge then return nil end
+    x,y=x-matrix.t.x,y-matrix.t.y
+    local px,py=(d*x-b*y)/determinant,(a*y-c*x)/determinant
+    if px~=px or py~=py or math.abs(px)==math.huge or math.abs(py)==math.huge then return nil end
+    return px,py
+end
+function ENGINE_UI.item_point(state,item,source,x,y,width,height)
+    -- OBS's draw matrix already includes position, alignment, rotation,
+    -- signed scale and bounds fitting. It maps the cropped texture's origin;
+    -- add the crop offset after inversion to recover source coordinates.
+    state.pointer_matrix=state.pointer_matrix or obslua.matrix4()
+    local matrix=state.pointer_matrix
+    obslua.obs_sceneitem_get_draw_transform(item,matrix)
+    local px,py=ENGINE_UI.inverse_point(matrix,x,y)
+    if not px then return nil end
+    if not width or not height or width<=0 or height<=0 then return nil end
+    state.pointer_crop=state.pointer_crop or obslua.obs_sceneitem_crop()
+    local crop=state.pointer_crop
+    obslua.obs_sceneitem_get_crop(item,crop)
+    local left,right,top,bottom=crop.left,crop.right,crop.top,crop.bottom
+    if obslua.obs_sceneitem_get_info2 and obslua.obs_transform_info and obslua.obs_sceneitem_get_box_transform then
+        state.pointer_info=state.pointer_info or obslua.obs_transform_info()
+        local info=state.pointer_info
+        obslua.obs_sceneitem_get_info2(item,info)
+        -- Bounds cropping is additional to the user crop. Read the actual
+        -- box/draw scales rather than assuming OBS absolute-coordinate mode.
+        if info.crop_to_bounds and (info.bounds_type==obslua.OBS_BOUNDS_SCALE_OUTER or
+           info.bounds_type==obslua.OBS_BOUNDS_SCALE_TO_WIDTH or info.bounds_type==obslua.OBS_BOUNDS_SCALE_TO_HEIGHT) then
+            local sx=math.sqrt(matrix.x.x^2+matrix.x.y^2)
+            local sy=math.sqrt(matrix.y.x^2+matrix.y.y^2)
+            state.pointer_box=state.pointer_box or obslua.matrix4()
+            local box=state.pointer_box;obslua.obs_sceneitem_get_box_transform(item,box)
+            local dx=math.sqrt(box.x.x^2+box.x.y^2)-(width-left-right)*sx
+            local dy=math.sqrt(box.y.x^2+box.y.y^2)-(height-top-bottom)*sy
+            local horizontal=dx<-.1
+            if horizontal or dy<-.1 then
+                local overdraw=math.abs((horizontal and dx or dy)/(horizontal and sx or sy))
+                local align=info.bounds_alignment
+                local before
+                if bit.band(align,horizontal and 1 or 4)~=0 then before=0
+                elseif bit.band(align,horizontal and 2 or 8)~=0 then before=overdraw
+                else before=overdraw/2 end
+                local after=overdraw-before
+                if (horizontal and info.scale.x or info.scale.y)<0 then before,after=after,before end
+                before,after=math.floor(before+.5),math.floor(after+.5)
+                if horizontal then left,right=left+before,right+after else top,bottom=top+before,bottom+after end
+            end
+        end
+    end
+    px,py=px+left,py+top
+    return px,py,px>=left and py>=top and px<width-right and py<height-bottom,width,height
+end
+function ENGINE_UI.pointer_targets(ctx,sample)
+    local state=ctx.ui_state;local targets={}
+    if interaction_current and interaction_current.input_focused then
+        -- OBS Interact events are already source-local. Inverting a scene
+        -- transform here would apply it twice (and affect other sources).
+        for _,surface in ipairs(state.surfaces) do
+            if interaction_current.name==surface.name then
+                targets[1]={surface=surface,path='interact:'..surface.name,
+                    x=sample.x*surface.width/interaction_current.width,
+                    y=sample.y*surface.height/interaction_current.height,inside=sample.mouse_inside}
+            end
+        end
+        return targets
+    end
+    -- Read only retained UI items, using non-locking OBS metadata getters.
+    -- obs_scene_enum_items/find_source/get_order_position take the scene mutex.
+    -- A render thread may own that mutex while waiting for this Lua state;
+    -- calling them here can deadlock OBS when a source is moved or reloaded.
+    for _,surface in ipairs(state.surfaces) do
+        local item=surface.scene_item
+        -- Opaque OBS handles have distinct Lua userdata wrappers on each call;
+        -- == compares those wrappers, not their underlying native pointers.
+        -- Compare the owning source UUID instead (both getters are lock-free).
+        local parent=item and obslua.obs_sceneitem_get_scene(item)
+        if parent and obslua.obs_source_get_uuid(obslua.obs_scene_get_source(parent))==surface.scene_uuid and
+           obslua.obs_sceneitem_visible(item) and obslua.obs_source_showing(surface.scene_source) then
+            local frame=surface.canvas.frame
+            local px,py,inside,width,height=ENGINE_UI.item_point(state,item,nil,sample.x,sample.y,
+                frame.output_width,frame.output_height)
+            if px then targets[#targets+1]={surface=surface,path=surface.name,
+                x=px*surface.width/width,y=py*surface.height/height,inside=sample.mouse_inside and inside} end
+        end
+    end
+    return targets
+end
+function ENGINE_UI.poll(ctx,sample,text,dt)
+    local state=ctx.ui_state;if not state then return end
+    state.dt=dt
+    ENGINE_UI.sync(ctx);ENGINE_UI.layout(ctx)
+    local window=sample._ui_window or ctx.input_event_poll and ctx.input_event_poll.input_active_window or interaction_current
+    if state.window and state.window~=window then ENGINE_UI.focus(ctx,nil);state.capture=nil end
+    state.window=window
+    local focus=state.focus
+    if not sample.focused or focus and (not focus.shown or not focus.active) then ENGINE_UI.focus(ctx,nil);state.capture=nil end
+    local targets=ENGINE_UI.pointer_targets(ctx,sample)
+    local hit,hit_target,capture_target
+    local visible={}
+    for _,target in ipairs(targets) do
+        visible[target.surface]=true
+        if state.capture_path==target.path then capture_target=target end
+        for _,w in ipairs(state.order) do if w.surface==target.surface then w.mx,w.my=target.x,target.y end end
+    end
+    if state.focus and not visible[state.focus.surface] then ENGINE_UI.focus(ctx,nil) end
+    if state.capture and (not capture_target or not sample.mouse_inside) then state.capture=nil;state.capture_path=nil end
+    local function pointer_listener(w)
+        for _,kind in ipairs({'click','press','release','mouse_enter','mouse_leave'}) do
+            if ctx.input_handlers and ctx.input_handlers['ui:'..w.name..':'..kind] then return true end
+        end
+    end
+    for target_index=#targets,1,-1 do
+        local target=targets[target_index]
+        for i=#state.order,1,-1 do
+            local w=state.order[i]
+            local c=w.clip
+            if w.surface==target.surface and not hit and sample.focused and target.inside and w.shown and (w.kind~='label' or pointer_listener(w)) and
+               target.x>=c[1] and target.x<c[3] and target.y>=c[2] and target.y<c[4] then
+                hit,hit_target=w,target;w.mx,w.my=target.x,target.y
+            end
+        end
+    end
+    if state.capture and capture_target then state.capture.mx,state.capture.my=capture_target.x,capture_target.y end
+    if state.hover~=hit then
+        if state.hover then state.hover.surface.dirty=true;ENGINE_UI.emit(ctx,state.hover,'mouse_leave') end
+        state.hover=hit;if hit then hit.surface.dirty=true;ENGINE_UI.emit(ctx,hit,'mouse_enter') end
+    end
+    for _,w in ipairs(state.order) do if w.kind=='tabs' then
+        local index=hit==w and math.max(1,math.min(#w.items,math.floor((w.mx-w.ax)/w.width*#w.items)+1)) or nil
+        if w.hover_tab~=index then w.hover_tab=index;w.surface.dirty=true end
+    end end
+    local function pressed(key) return sample.keys[key] and sample.keys[key].pressed end
+    local function down(key) return sample.keys[key] and sample.keys[key].down end
+    -- Key repeat belongs to editing/navigation, never to button clicks. It
+    -- works with polling backends as well as OBS interaction text events.
+    state.repeat_keys=state.repeat_keys or {}
+    local repeats={}
+    for _,key in ipairs({'LEFT','RIGHT','BACKSPACE','DELETE'}) do
+        local timer=state.repeat_keys[key]
+        if not down(key) or ctx.input_event_poll and ctx.input_event_poll.input_blocked and ctx.input_event_poll.input_blocked[key] then state.repeat_keys[key]=nil
+        elseif pressed(key) or not timer then state.repeat_keys[key]=.4
+        else
+            timer=timer-dt
+            if timer<=0 then repeats[key]=true;timer=.05 end
+            state.repeat_keys[key]=timer
+        end
+    end
+    local function editing_key(key) return pressed(key) or repeats[key] end
+    local mouse=sample.keys.MOUSE_LEFT or {}
+    if mouse.pressed then
+        local target=hit and hit.active and hit or nil
+        ENGINE_UI.focus(ctx,target and target.kind~='panel' and target.kind~='label' and target or nil);state.capture=target
+        state.capture_path=target and hit_target.path or nil
+        if target then
+            ENGINE_UI.emit(ctx,target,'press')
+            target.surface.dirty=true
+            if target.kind=='input' then
+                local advance=(target.font=='readable' and 6 or 4)*target.scale
+                target.caret=math.max(0,math.min(#ENGINE_UI.characters(target.value),
+                    math.floor((target.mx-target.ax-target.padding)/advance+.5)+(target.scroll or 0)))
+                if not down('SHIFT') then target.anchor=target.caret end
+            end
+        end
+    end
+    local capture=state.capture
+    if capture and capture.kind=='slider' and capture.shown and capture.active and sample.focused and (mouse.down or mouse.pressed or mouse.released) then
+        local ratio=math.max(0,math.min(1,(capture.mx-capture.ax-capture.padding)/math.max(1,capture.width-2*capture.padding)))
+        ENGINE_UI.write(ctx,capture,capture.min+ratio*(capture.max-capture.min),true)
+    end
+    if capture and capture.kind=='input' and capture.shown and capture.active and sample.focused and mouse.down then
+        local advance=(capture.font=='readable' and 6 or 4)*capture.scale
+        local caret=math.max(0,math.min(#ENGINE_UI.characters(capture.value),
+            math.floor((capture.mx-capture.ax-capture.padding)/advance+.5)+(capture.scroll or 0)))
+        if caret~=capture.caret then capture.caret=caret;capture.surface.dirty=true end
+    end
+    local function activate(w)
+        if w.kind=='checkbox' then ENGINE_UI.write(ctx,w,not w.checked,true) end
+        if w.kind=='tabs' then
+            ENGINE_UI.write(ctx,w,math.max(1,math.min(#w.items,math.floor((w.mx-w.ax)/w.width*#w.items)+1)),true)
+            ENGINE_UI.layout(ctx)
+        end
+        ENGINE_UI.emit(ctx,w,'click')
+    end
+    if mouse.released then
+        if capture then
+            capture.surface.dirty=true
+            if capture.active and capture.shown and sample.focused then
+                ENGINE_UI.emit(ctx,capture,'release')
+                if capture==hit and hit_target.path==state.capture_path then activate(capture) end
+            end
+        end
+        state.capture=nil
+        state.capture_path=nil
+    end
+    local shift=down('SHIFT');local ctrl=down('CTRL')
+    if pressed('TAB') and sample.focused then
+        local controls={};local at
+        for _,w in ipairs(state.order) do
+            if w.shown and w.active and visible[w.surface] and w.kind~='label' and w.kind~='panel' then
+                controls[#controls+1]=w;if state.focus==w then at=#controls end
+            end
+        end
+        if #controls>0 then ENGINE_UI.focus(ctx,controls[((at or (shift and 1 or 0))+(shift and -2 or 0))%#controls+1]) end
+        text='' -- Tab is navigation, not text insertion.
+    end
+    focus=state.focus
+    state.pointer_captured=hit~=nil or state.capture~=nil
+    state.keyboard_captured=focus~=nil
+    if not focus or not focus.active or not focus.shown or not sample.focused then return end
+    if focus.kind=='button' or focus.kind=='checkbox' then
+        if pressed('ENTER') or pressed('SPACE') then activate(focus) end
+    elseif focus.kind=='tabs' then
+        if editing_key('LEFT') then ENGINE_UI.write(ctx,focus,math.max(1,focus.value-1),true) end
+        if editing_key('RIGHT') then ENGINE_UI.write(ctx,focus,math.min(#focus.items,focus.value+1),true) end
+        if pressed('HOME') then ENGINE_UI.write(ctx,focus,1,true) end
+        if pressed('END') then ENGINE_UI.write(ctx,focus,#focus.items,true) end
+    elseif focus.kind=='slider' then
+        if editing_key('LEFT') then ENGINE_UI.write(ctx,focus,focus.value-focus.step,true) end
+        if editing_key('RIGHT') then ENGINE_UI.write(ctx,focus,focus.value+focus.step,true) end
+        if pressed('HOME') then ENGINE_UI.write(ctx,focus,focus.min,true) end
+        if pressed('END') then ENGINE_UI.write(ctx,focus,focus.max,true) end
+    elseif focus.kind=='input' then
+        local chars=ENGINE_UI.characters(focus.value)
+        focus.caret=math.min(focus.caret,#chars);focus.anchor=math.min(focus.anchor,#chars)
+        if ctrl and pressed('A') then focus.anchor=0;focus.caret=#chars;focus.surface.dirty=true end
+        if ctrl and (pressed('C') or pressed('X')) and not focus.password then
+            local lo,hi=math.min(focus.anchor,focus.caret),math.max(focus.anchor,focus.caret)
+            local result=ENGINE_UI.clipboard(ctx,'copy',table.concat(chars,'',lo+1,hi));state.error=result.error or ''
+            if result.ok==1 and pressed('X') then ENGINE_UI.edit(ctx,focus,'') end
+        end
+        if ctrl and pressed('V') then
+            local result=ENGINE_UI.clipboard(ctx,'paste');state.error=result.error or ''
+            if result.ok==1 then ENGINE_UI.edit(ctx,focus,ENGINE_UI.normalize(focus,result.text)) end
+        end
+        local moved
+        if editing_key('LEFT') then moved=not shift and focus.anchor~=focus.caret and math.min(focus.anchor,focus.caret) or math.max(0,focus.caret-1) end
+        if editing_key('RIGHT') then moved=not shift and focus.anchor~=focus.caret and math.max(focus.anchor,focus.caret) or math.min(#chars,focus.caret+1) end
+        if pressed('HOME') then moved=0 end
+        if pressed('END') then moved=#chars end
+        if moved then focus.caret=moved;if not shift then focus.anchor=moved end;focus.surface.dirty=true end
+        if editing_key('DELETE') then
+            if focus.caret==focus.anchor then focus.anchor=math.min(#chars,focus.caret+1) end
+            ENGINE_UI.edit(ctx,focus,'')
+        end
+        if not ctrl then
+            if editing_key('BACKSPACE') then
+                if focus.caret==focus.anchor then focus.anchor=math.max(0,focus.caret-1) end
+                ENGINE_UI.edit(ctx,focus,'')
+            end
+            for _,char in ipairs(ENGINE_UI.characters(text or '')) do
+                if char=='\b' then
+                    if not down('BACKSPACE') then
+                        if focus.caret==focus.anchor then focus.anchor=math.max(0,focus.caret-1) end
+                        ENGINE_UI.edit(ctx,focus,'')
+                    end
+                elseif char:byte()>=32 and char:byte()~=127 then ENGINE_UI.edit(ctx,focus,char) end
+            end
+        end
+        if pressed('ENTER') then ENGINE_UI.emit(ctx,focus,'submit') end
+    end
+end
+function ENGINE_UI.render(ctx)
+    local state=ctx.ui_state;if not state then return end
+    ENGINE_UI.sync(ctx);ENGINE_UI.layout(ctx)
+    for _,surface in ipairs(state.surfaces) do
+        if surface.dirty and raymaze_frames[surface.name]==surface.canvas.frame then
+            local frame=surface.canvas.frame
+            ffi.fill(frame.words,frame.w*frame.h*4,0)
+            local function rect(w,x,y,width,height,color)
+                local c=w.clip;local right,bottom=math.min(x+width,c[3]),math.min(y+height,c[4])
+                x,y=math.max(x,c[1]),math.max(y,c[2])
+                canvas_rect(frame,x,y,right-x,bottom-y,color)
+            end
+            local function text(w,value,x,y,color,limit)
+                local font=w.font=='readable' and canvas_readable_font or canvas_font
+                local step=w.font=='readable' and 6 or 4
+                for _,char in ipairs(ENGINE_UI.characters(value)) do
+                    if limit and x+(step-1)*w.scale>limit then break end
+                    local glyph=font[char:upper()] or font['?']
+                    if glyph then
+                        for row,bits in ipairs(glyph) do for col=1,#bits do
+                            if bits:sub(col,col)=='1' then rect(w,x+(col-1)*w.scale,y+(row-1)*w.scale,w.scale,w.scale,color) end
+                        end end
+                    end
+                    x=x+step*w.scale
+                end
+            end
+            local function rounded(w,x,y,width,height,radius,color)
+                if w.clip[3]<=w.clip[1] or w.clip[4]<=w.clip[2] or width<=0 or height<=0 then return end
+                radius=math.min(radius,width/2,height/2)
+                if radius<=0 then rect(w,x,y,width,height,color);return end
+                for row=math.max(0,math.floor(w.clip[2]-y)),math.min(math.floor(height)-1,math.ceil(w.clip[4]-y)-1) do
+                    local distance=math.max(0,radius-.5-row,row+.5-(height-radius))
+                    local inset=distance>0 and math.ceil(radius*(1-math.sqrt(math.max(0,1-(distance/radius)^2)))) or 0
+                    rect(w,x+inset,y+row,width-2*inset,1,color)
+                end
+            end
+            for _,w in ipairs(state.order) do
+                if w.surface==surface and w.shown then
+                    local function color(key) return ENGINE_UI.color(w[key]) end
+                    local fg=w.active and color('text_color') or color('disabled_color')
+                    local bg=w.kind~='panel' and state.capture==w and color('pressed_color') or
+                        w.kind~='panel' and state.hover==w and w.active and color('hover_color') or color('background')
+                    local x,y=w.ax,w.ay;local line=(w.font=='readable' and 7 or 5)*w.scale
+                    if w.kind~='label' then
+                        local border=state.focus==w and math.max(2,w.border_width) or w.border_width
+                        rounded(w,x,y,w.width,w.height,w.radius,state.focus==w and color('accent') or color('border_color'))
+                        rounded(w,x+border,y+border,w.width-2*border,w.height-2*border,math.max(0,w.radius-border),bg)
+                    end
+                    local tx,ty=x+w.padding,y+math.max(0,(w.height-line)/2)
+                    if w.kind=='tabs' then
+                        local width=w.width/#w.items
+                        for i,caption in ipairs(w.items) do
+                            local left=x+(i-1)*width
+                            local selected=w.value==i
+                            rounded(w,left+2,y+2,width-4,w.height-4,math.max(0,w.radius-2),
+                                selected and color('pressed_color') or w.hover_tab==i and w.active and color('hover_color') or color('background'))
+                            if selected then rect(w,left+8,y+w.height-4,width-16,2,color('accent')) end
+                            local length=#ENGINE_UI.characters(caption)*(w.font=='readable' and 6 or 4)*w.scale
+                            text(w,caption,math.max(left+6,left+(width-length)/2),ty,fg,left+width-6)
+                        end
+                    elseif w.kind=='input' then
+                        local chars=ENGINE_UI.characters(w.value)
+                        local advance=(w.font=='readable' and 6 or 4)*w.scale
+                        local slots=math.max(1,math.floor((w.width-2*w.padding)/advance))
+                        w.scroll=math.max(0,math.min(w.scroll or 0,math.max(0,#chars-slots)))
+                        if state.focus==w then
+                            if w.caret<w.scroll then w.scroll=w.caret end
+                            if w.caret>=w.scroll+slots then w.scroll=w.caret-slots+1 end
+                            local lo,hi=math.min(w.anchor,w.caret),math.max(w.anchor,w.caret)
+                            local a,b=math.max(lo,w.scroll),math.min(hi,w.scroll+slots)
+                            if b>a then rect(w,tx+(a-w.scroll)*advance,ty-2,(b-a)*advance,line+4,color('pressed_color')) end
+                        end
+                        local value=w.password and string.rep('*',#chars-w.scroll) or table.concat(chars,'',w.scroll+1)
+                        if #chars==0 and state.focus~=w then value=w.placeholder;fg=color('disabled_color') end
+                        text(w,value,tx,ty,fg,x+w.width-w.padding)
+                        if state.focus==w then rect(w,tx+(w.caret-w.scroll)*advance,ty,1,line,color('accent')) end
+                    elseif w.kind=='checkbox' then
+                        local size=math.min(22,w.height-8)
+                        rect(w,tx,y+(w.height-size)/2,size,size,color('disabled_color'))
+                        rect(w,tx+3,y+(w.height-size)/2+3,size-6,size-6,w.checked and color('accent') or bg)
+                        text(w,w.text,tx+size+10,ty,fg,x+w.width-w.padding)
+                    elseif w.kind=='slider' then
+                        local width=math.max(1,w.width-2*w.padding)
+                        local ratio=(w.value-w.min)/(w.max-w.min)
+                        rect(w,tx,y+w.height/2-2,width,4,color('disabled_color'))
+                        rect(w,tx,y+w.height/2-2,width*ratio,4,color('accent'))
+                        rect(w,tx+width*ratio-5,y+w.height/2-9,10,18,fg)
+                    elseif w.kind=='button' then
+                        local length=#ENGINE_UI.characters(w.text)*(w.font=='readable' and 6 or 4)*w.scale
+                        text(w,w.text,math.max(tx,x+(w.width-length)/2),ty,fg,x+w.width-w.padding)
+                    elseif w.kind=='label' then text(w,w.text,tx,ty,fg,x+w.width-w.padding) end
+                end
+            end
+            ffi.copy(frame.published_words,frame.words,frame.w*frame.h*4)
+            frame.version=frame.version+1;frame.dirty=false;surface.dirty=false
+        end
+    end
+end
+function ENGINE_UI.remove(ctx,name)
+    local state=ctx.ui_state;local w=state and state.widgets[name];if not w then return end
+    for i=#state.order,1,-1 do
+        local child=state.order[i]
+        if child.parent==name or child.tabs==name then ENGINE_UI.remove(ctx,child.name) end
+    end
+    if state.focus==w then ENGINE_UI.focus(ctx,nil) end
+    if state.hover==w then state.hover=nil end
+    if state.capture==w then state.capture=nil end
+    INPUT_EVENTS.off(ctx,'ui',name)
+    for i=#state.order,1,-1 do if state.order[i]==w then table.remove(state.order,i);break end end
+    state.widgets[name]=nil;w.surface.dirty=true
+end
+function ENGINE_UI.clear(ctx)
+    local state=ctx.ui_state;if not state then return end
+    ctx.ui_state=nil
+    for _,surface in ipairs(state.surfaces) do
+        if raymaze_frames[surface.name]==surface.canvas.frame then raymaze_frames[surface.name]=nil end
+        if ctx.canvas_states and ctx.canvas_states[surface.name]==surface.canvas then ctx.canvas_states[surface.name]=nil end
+        for key,canvas in pairs(ctx.canvas_selected or {}) do if canvas==surface.canvas then ctx.canvas_selected[key]=nil end end
+        if ctx.canvas_state==surface.canvas then ctx.canvas_state=nil end
+        ENGINE_UI.release_surface(surface)
+    end
+    INPUT_EVENTS.off(ctx,'ui')
+end
+function ENGINE_UI.release_surface(surface)
+    local item,source=surface.scene_item,surface.scene_source
+    surface.scene_item,surface.scene_source,surface.scene=nil,nil,nil
+    if item then obslua.obs_sceneitem_release(item) end
+    if source then obslua.obs_source_release(source) end
+end
+-- Widget commands are resolved against the running program, never registered
+-- in ANIM_LIB. Removing a control cannot leave a global command or a stale
+-- reference to its instance; existing built-ins and functions keep precedence.
+function ENGINE_UI.compile_member(name,args)
+    local first=safe_trim(tostring(args[1] or ''))
+    local action=first:lower()
+    local forwarded
+    if first:match('^[%w_]+%s*:') then
+        forwarded={'set',name}
+        for _,value in ipairs(args) do forwarded[#forwarded+1]=value end
+    elseif first=='' or first=='->' then
+        forwarded={'get',name}
+        for _,value in ipairs(args) do forwarded[#forwarded+1]=value end
+    elseif action=='on' or ENGINE_UI.events[action] or
+           ({set=true,get=true,value=true,hide=true,show=true,remove=true,focus=true,blur=true,paste=true,copy=true,off=true})[action] then
+        forwarded={action,name}
+        for i=2,#args do forwarded[#forwarded+1]=args[i] end
+    else
+        return function() return false,'UI Error: Unknown widget action '..first..'; use attributes or an event name' end
+    end
+    local handler=INPUT_EVENTS.is_handler('ui',forwarded)
+    if action=='blur' and not handler then
+        if #args~=1 then return function() return false,'UI Error: Widget blur takes no attributes' end end
+        return function(ctx)
+            local ui=ctx.ui_state
+            if ui and ui.focus==ui.widgets[name] then ENGINE_UI.focus(ctx,nil) end
+            return true
+        end
+    end
+    local execute=compile_line('ui',forwarded)
+    return function(ctx,state)
+        if handler and not forwarded._input_handler then
+            local code,why=INPUT_EVENTS.compile(ctx,forwarded,args._source_line,args._source_command,'ui')
+            if not code then return false,why end
+            forwarded._input_handler=code
+        end
+        return execute(ctx,state)
+    end
+end
+ANIM_LIB.ui=function(ctx,state,args)
+    local action=tostring(args[1] or ''):lower()
+    if action=='frame' or action=='box' then action='panel' end
+    local function fail(why) return false,'UI Error: '..tostring(why) end
+    if args._input_handler or INPUT_EVENTS.is_handler('ui',args) then return INPUT_EVENTS.register(ctx,args,'ui') end
+    if action=='create' then
+        local fields,why=ENGINE_UI.attributes(ctx,args,2,{name=true,width=true,height=true})
+        if not fields then return fail(why) end
+        local name=fields.name or 'UI';local screen=(ctx.active_scope or {}).screen or {}
+        local width,height=fields.width or screen.width or 960,fields.height or screen.height or 540
+        if width<1 or height<1 or width>8192 or height>8192 or width%1~=0 or height%1~=0 or width*height>16777216 then
+            return fail('Canvas dimensions must be whole numbers from 1 to 8192, at most 16 million pixels')
+        end
+        if ctx.canvas_states and ctx.canvas_states[name] then return fail('Canvas '..name..' already exists; use a new UI name') end
+        local selected,canvas_selected=ctx.canvas_state,ctx.canvas_selected and ctx.canvas_selected[ctx.context_id or 0]
+        local capture={_capture_ui_item=true}
+        local ok,err=ANIM_LIB.renderer(ctx,capture, {'create','name:'..name,'kind:pixel',
+            'width:'..(screen.width or width),'height:'..(screen.height or height),'locked:true'})
+        if not ok then return fail(err) end
+        local canvas_ok
+        canvas_ok,ok,err=pcall(ANIM_LIB.canvas,ctx,{_ui_name=name,_ui_item=capture.ui_item}, {'create','name:'..name,'width:'..width,'height:'..height})
+        if not canvas_ok then err=ok;ok=false end
+        if not ok then
+            ENGINE_UI.release_surface({scene_item=capture.ui_item,scene_source=capture.ui_scene_source})
+            return fail(err)
+        end
+        local surface={name=name,width=width,height=height,canvas=ctx.canvas_states[name],dirty=true,visible=true,
+            scene_item=capture.ui_item,scene=capture.ui_scene,scene_source=capture.ui_scene_source,
+            scene_uuid=obslua.obs_source_get_uuid(capture.ui_scene_source),
+            scene_width=screen.width or width,scene_height=screen.height or height}
+        surface.canvas.frame.output_width,surface.canvas.frame.output_height=surface.scene_width,surface.scene_height
+        ctx.canvas_state=selected;ctx.canvas_selected[ctx.context_id or 0]=canvas_selected
+        local ui=ctx.ui_state or {surfaces={},widgets={},order={},styles={},error=''};ctx.ui_state=ui
+        ui.surfaces[#ui.surfaces+1]=surface;ui.selected=surface
+        if not ctx.input_preview and not ctx.input_viewport then
+            ctx.input_preview={width=screen.width or width,height=screen.height or height}
+        end
+        return true
+    end
+    local ui=ctx.ui_state;if not ui then return fail('Create a UI first with !ui | create') end
+    if action=='clear' then
+        if #args~=1 then return fail('clear takes no arguments and removes this program\'s UI') end
+        ENGINE_UI.clear(ctx);return true
+    elseif action=='update' or action=='blur' then
+        if #args~=1 then return fail(action..' takes no arguments') end
+        if action=='blur' then ENGINE_UI.focus(ctx,nil) else ENGINE_UI.render(ctx) end
+        return true
+    elseif action=='state' then
+        local fields,why=ENGINE_UI.attributes(ctx,args,2,{into=true});if not fields then return fail(why) end
+        if not fields.into then return fail('state requires -> | variable or into:variable') end
+        local result=update_variable_state(ctx,fields.into,{focused=ui.focus and ui.focus.name or '',
+            hovered=ui.hover and ui.hover.name or '',pointer_captured=ui.pointer_captured and 1 or 0,
+            keyboard_captured=ui.keyboard_captured and 1 or 0,error=ui.error or ''})
+        if is_fatal(result) then return fail(result.msg) end;return true
+    end
+    local name=INPUT_EVENTS.selector(args[2]);if name=='' then return fail('Missing control name') end
+    if action=='style' then
+        local allowed={font=true};for key in pairs(ENGINE_UI.defaults) do allowed[key]=true end
+        local fields,why=ENGINE_UI.attributes(ctx,args,3,allowed);if not fields then return fail(why) end
+        local candidate={kind='panel',width=1,height=1,font='readable'}
+        for key,value in pairs(ENGINE_UI.defaults) do candidate[key]=value end
+        local style={};for key,value in pairs(ui.styles[name] or {}) do style[key]=value;candidate[key]=value end
+        for key,value in pairs(fields) do style[key]=value;candidate[key]=value end
+        why=ENGINE_UI.validate(candidate);if why then return fail(why) end
+        ui.styles[name]=style;ENGINE_UI.restyle(ui);return true
+    end
+    if action=='use' then
+        if #args~=2 then return fail('use takes one UI surface name') end
+        for _,surface in ipairs(ui.surfaces) do if surface.name==name then ui.selected=surface;return true end end
+        return fail('No UI named '..name)
+    end
+    if ENGINE_UI.kinds[action] then
+        if ui.widgets[name] then return fail('Control '..name..' already exists; use set to change it') end
+        local fields,why=ENGINE_UI.attributes(ctx,args,3,ENGINE_UI.allowed(action));if not fields then return fail(why) end
+        local w={name=name,kind=action,surface=ui.selected,scope=ctx.active_scope,x=0,y=0,width=200,height=44,
+            visible=true,enabled=true,font='readable',text='',placeholder='',value='',checked=false,password=false,
+            max_length=256,min=0,max=100,step=1,caret=0,anchor=0}
+        for key,value in pairs(fields) do w[key]=value end
+        if w.style and not ui.styles[w.style] then return fail('Define style '..w.style..' before using it') end
+        if w.tabs then
+            local tabs=ui.widgets[w.tabs]
+            if not tabs or tabs.kind~='tabs' or tabs.surface~=w.surface or not w.tab or w.tab%1~=0 or w.tab<1 or w.tab>#tabs.items then
+                return fail('tabs must name an existing tabs control; tab is its 1-based page number')
+            end
+        elseif w.tab then return fail('tab requires tabs:control_name') end
+        if w.parent then
+            local p=ui.widgets[w.parent]
+            if not p or p.kind~='panel' or p.surface~=w.surface then return fail('parent must be an existing panel on this UI') end
+        end
+        w.inline={};for key,value in pairs(fields) do
+            if ENGINE_UI.defaults[key]~=nil or key=='font' then w.inline[key]=value end
+        end
+        ENGINE_UI.apply_style(w,ui)
+        why=ENGINE_UI.validate(w);if why then return fail(why) end
+        if action=='input' or action=='slider' or action=='checkbox' or action=='tabs' then
+            local value=w.bind and w.scope[w.bind]
+            if value==nil then value=action=='checkbox' and w.checked or action=='slider' and (fields.value or w.min) or action=='tabs' and (fields.value or 1) or w.value end
+            local ok,err=ENGINE_UI.write(ctx,w,value,false);if not ok then return fail(err) end
+            w.caret=#ENGINE_UI.characters(tostring(w.value));w.anchor=w.caret
+        end
+        ui.widgets[name]=w;ui.order[#ui.order+1]=w;w.surface.dirty=true;return true
+    end
+    local w=ui.widgets[name];if not w then return fail('No control named '..name) end
+    if action=='remove' or action=='show' or action=='hide' or action=='focus' then
+        if #args~=2 then return fail(action..' takes one control name') end
+        if action=='remove' then ENGINE_UI.remove(ctx,name)
+        elseif action=='focus' then
+            ENGINE_UI.layout(ctx)
+            if not w.shown or not w.active or w.kind=='panel' or w.kind=='label' then return fail('Control cannot receive focus') end
+            ENGINE_UI.focus(ctx,w)
+        else w.visible=action=='show';w.surface.dirty=true;ENGINE_UI.layout(ctx) end
+        return true
+    elseif action=='paste' or action=='copy' then
+        if #args~=2 or w.kind~='input' then return fail(action..' takes one input control name') end
+        if not w.enabled then return fail('Input is disabled') end
+        if action=='copy' and w.password then return fail('Password inputs cannot be copied') end
+        local result=ENGINE_UI.clipboard(ctx,action,action=='copy' and w.value or nil)
+        ui.error=result.error or ''
+        if result.ok==1 and action=='paste' then ENGINE_UI.edit(ctx,w,ENGINE_UI.normalize(w,result.text)) end
+        return true
+    elseif action=='off' then
+        if #args>3 then return fail('off takes a control name and optional event kind') end
+        INPUT_EVENTS.off(ctx,'ui',name,args[3]);return true
+    elseif action=='get' or action=='value' then
+        local fields,why=ENGINE_UI.attributes(ctx,args,3,{into=true});if not fields then return fail(why) end
+        if not fields.into then return fail(action..' needs -> | variable or into:variable') end
+        ENGINE_UI.sync(ctx);ENGINE_UI.layout(ctx)
+        local value=ENGINE_UI.value(w)
+        if action=='value' and value==nil then return fail('Only inputs, checkboxes, and sliders have values') end
+        if action=='get' then value={name=w.name,kind=w.kind,text=w.items and w.items[w.value] or w.text,value=value,checked=w.checked and 1 or 0,
+            x=w.ax,y=w.ay,width=w.width,height=w.height,visible=w.shown and 1 or 0,enabled=w.active and 1 or 0,
+            focused=ui.focus==w and 1 or 0,hovered=ui.hover==w and 1 or 0} end
+        local result=update_variable_state(ctx,fields.into,value);if is_fatal(result) then return fail(result.msg) end;return true
+    elseif action=='set' then
+        local allowed=ENGINE_UI.allowed(w.kind);allowed.parent=nil;allowed.bind=nil;allowed.tabs=nil;allowed.tab=nil;allowed.items=nil
+        local fields,why=ENGINE_UI.attributes(ctx,args,3,allowed);if not fields then return fail(why) end
+        local candidate={};for k,v in pairs(w) do candidate[k]=v end;for k,v in pairs(fields) do candidate[k]=v end
+        if candidate.style and not ui.styles[candidate.style] then return fail('No style named '..candidate.style) end
+        candidate.inline={};for k,v in pairs(w.inline) do candidate.inline[k]=v end
+        for k,v in pairs(fields) do if ENGINE_UI.defaults[k]~=nil or k=='font' then candidate.inline[k]=v end end
+        ENGINE_UI.apply_style(candidate,ui)
+        why=ENGINE_UI.validate(candidate);if why then return fail(why) end
+        if (w.kind=='slider' or w.kind=='tabs') and not ENGINE_UI.normalize(candidate,candidate.value) then return fail('Invalid numeric value') end
+        for k,v in pairs(fields) do if k~='value' and k~='checked' then w[k]=v end end
+        w.inline=candidate.inline
+        ENGINE_UI.restyle(ui)
+        if w.kind=='input' or w.kind=='slider' or w.kind=='checkbox' or w.kind=='tabs' then
+            local value=fields.value
+            if w.kind=='checkbox' then value=fields.checked;if value==nil then value=w.checked end
+            elseif value==nil then value=w.value end
+            local ok,err=ENGINE_UI.write(ctx,w,value,false);if not ok then return fail(err) end
+            w.caret=#ENGINE_UI.characters(tostring(w.value));w.anchor=w.caret
+        end
+        w.surface.dirty=true;ENGINE_UI.layout(ctx)
+        if ui.focus and (not ui.focus.active or not ui.focus.shown) then ENGINE_UI.focus(ctx,nil) end
+        if ui.capture and (not ui.capture.active or not ui.capture.shown) then ui.capture=nil end
+        return true
+    end
+    return fail('Unknown action '..action)
+end
+
 local function release_canvas_buffers(ctx)
+    if ENGINE_UI then ENGINE_UI.clear(ctx) end
     if ctx.canvas_states then
         for name, canvas in pairs(ctx.canvas_states) do
             if raymaze_frames[name] == canvas.frame then raymaze_frames[name] = nil end
@@ -12469,6 +13510,7 @@ function INPUT_EVENTS.condition(ctx,binding,value)
     if op=='<' then return a<b elseif op=='>' then return a>b elseif op=='<=' then return a<=b else return a>=b end
 end
 function INPUT_EVENTS.collect(ctx,binding,dt)
+    if binding.code.family=='ui' then return end
     local code=binding.code
     if code.family=='collision' then return end
     if code.family=='change' then
@@ -13501,6 +14543,7 @@ end
 local preview_menu_bridge
 local preview_menu_ui_code = [=[
 local ffi = require("ffi")
+local bit = require("bit")
 -- Win32/Qt calls may dispatch nested callbacks. JIT-compiled FFI calls cannot
 -- safely re-enter Lua; keep this small UI-only state in the interpreter.
 require("jit").off()
@@ -13537,6 +14580,7 @@ ffi.cdef[[
     void * __stdcall CreateWindowExW(unsigned long, const uint16_t *, const uint16_t *,
         unsigned long, int, int, int, int, void *, void *, void *, void *);
     int __stdcall DestroyWindow(void *);
+    int __stdcall PostMessageW(void *, unsigned int, uintptr_t, intptr_t);
     intptr_t __stdcall DefWindowProcW(void *, unsigned int, uintptr_t, intptr_t);
     void obs_frontend_open_projector(const char *, int, const char *, const char *);
     void blog(int, const char *, ...);
@@ -13561,29 +14605,45 @@ local set_focus = ffi.cast("void (__cdecl *)(void *, int)",
     symbol("?setFocus@QWidget@@QEAAXW4FocusReason@Qt@@@Z"))
 local saved = {}
 local projectors = {}
+local projector_roots = {}
+local menu_blocked, escape_game, projector_exit = false, false, 0
 local subclass_id = ffi.new("uintptr_t", 0x34494D33)
 local projector_proc
 projector_proc = ffi.cast("im3_menu_subclass_t", function(hwnd, message,
         wparam, lparam, identifier, reference)
-    if message == 0x0204 or message == 0x0205 or message == 0x0206 or
-       message == 0x007B then -- right down/up/double click or WM_CONTEXTMENU
+    local key=tostring(ffi.cast("uintptr_t",hwnd))
+    local vk=tonumber(wparam)
+    if message==0x0100 or message==0x0101 or message==0x0104 or message==0x0105 then
+        if projector_exit~=0 and vk==projector_exit then
+            if (message==0x0100 or message==0x0104) and bit.band(tonumber(lparam),0x40000000)==0 then
+                -- Queue a close of this projector's top-level window, never OBS.
+                local root=projector_roots[key]
+                if root then user.PostMessageW(ffi.cast("void *",root),0x0010,0,0) end
+            end
+            return 0
+        end
+        if escape_game and vk==27 then return 0 end
+    end
+    if escape_game and (message==0x0102 or message==0x0106) and vk==27 then return 0 end
+    if menu_blocked and (message == 0x0204 or message == 0x0205 or message == 0x0206 or
+       message == 0x007B) then -- right down/up/double click or WM_CONTEXTMENU
         return 0
     end
     if message == 0x0082 then -- WM_NCDESTROY
         comctl.RemoveWindowSubclass(hwnd, projector_proc, subclass_id)
-        projectors[tostring(ffi.cast("uintptr_t", hwnd))] = nil
+        projectors[key],projector_roots[key] = nil,nil
     end
     return comctl.DefSubclassProc(hwnd, message, wparam, lparam)
 end)
-local function restore()
+local function restore(keep_projectors)
     local failed = false
-    for key, hwnd_id in pairs(projectors) do
+    for key, hwnd_id in pairs(keep_projectors and {} or projectors) do
         local hwnd = ffi.cast("void *", hwnd_id)
         if user.IsWindow(hwnd) ~= 0 and
            comctl.RemoveWindowSubclass(hwnd, projector_proc, subclass_id) == 0 then
             failed = true
         else
-            projectors[key] = nil
+            projectors[key],projector_roots[key] = nil,nil
         end
     end
     for key, entry in pairs(saved) do
@@ -13604,6 +14664,14 @@ local function block_projectors()
     local title_wide = ffi.new("uint16_t[512]")
     local title_utf8 = ffi.new("char[2048]")
     local own_pid = kernel.GetCurrentProcessId()
+    local function hook(hwnd,root)
+        local id=ffi.cast("uintptr_t",hwnd)
+        local key=tostring(id)
+        if projectors[key]~=nil or comctl.SetWindowSubclass(hwnd,projector_proc,subclass_id,0)~=0 then
+            projectors[key]=id;projector_roots[key]=ffi.cast("uintptr_t",root)
+            changed=changed+1
+        end
+    end
     local enumerate = ffi.cast("im3_enum_child_t", function(hwnd)
         local pid = ffi.new("unsigned long[1]")
         user.GetWindowThreadProcessId(hwnd, pid)
@@ -13615,13 +14683,10 @@ local function block_projectors()
         if bytes <= 0 or ffi.string(title_utf8, bytes) ~= _G.im3_projector_title then
             return 1
         end
-        local id = ffi.cast("uintptr_t", hwnd)
-        local key = tostring(id)
-        if projectors[key] ~= nil or
-           comctl.SetWindowSubclass(hwnd, projector_proc, subclass_id, 0) ~= 0 then
-            projectors[key] = id
-            changed = changed + 1
-        end
+        hook(hwnd,hwnd)
+        -- Focus can belong to the embedded display's native child window.
+        local child=ffi.cast("im3_enum_child_t",function(window) hook(window,hwnd);return 1 end)
+        user.EnumChildWindows(hwnd,child,0);child:free()
         return 1
     end)
     user.EnumWindows(enumerate, 0)
@@ -13677,6 +14742,76 @@ local function focus_preview(main)
         set_focus(widget, 7) -- Qt::OtherFocusReason; does not activate OBS.
     end)
 end
+-- Read Qt only on its UI thread. Publish plain numbers to the script tick;
+-- never call a Qt getter synchronously from the main script/render thread.
+local function preview_geometry_reader()
+    local core=kernel.GetModuleHandleA('Qt6Core.dll')
+    local function api(module,name,kind)
+        local address=kernel.GetProcAddress(module,name)
+        assert(address~=nil and address~=ffi.NULL,'Preview metadata API unavailable: '..name)
+        return ffi.cast(kind,address)
+    end
+    local string_new=api(core,'??0QString@@QEAA@PEBVQChar@@_J@Z','void (*)(void*,const uint16_t*,intptr_t)')
+    local string_free=api(core,'??1QString@@QEAA@XZ','void (*)(void*)')
+    local string_data=api(core,'?constData@QString@@QEBAPEBVQChar@@XZ','const uint16_t* (*)(void*)')
+    local find=api(core,'?qt_qFindChild_helper@@YAPEAVQObject@@PEBV1@AEBVQString@@AEBUQMetaObject@@V?$QFlags@W4FindChildOption@Qt@@@@@Z',
+        'void* (*)(void*,const void*,const void*,int)')
+    local meta=kernel.GetProcAddress(qt,'?staticMetaObject@QWidget@@2UQMetaObject@@B')
+    assert(meta~=nil and meta~=ffi.NULL,'QWidget metadata is unavailable')
+    local index=api(qt,'?currentIndex@QComboBox@@QEBAHXZ','int (*)(void*)')
+    local current=api(qt,'?currentText@QComboBox@@QEBA?AVQString@@XZ','void* (*)(void*,void*)')
+    local placeholder=api(qt,'?placeholderText@QComboBox@@QEBA?AVQString@@XZ','void* (*)(void*,void*)')
+    local position=api(qt,'?sliderPosition@QAbstractSlider@@QEBAHXZ','int (*)(void*)')
+    local window=api(qt,'?effectiveWinId@QWidget@@QEBA_KXZ','uintptr_t (*)(void*)')
+    local function child(parent,name)
+        local chars=ffi.new('uint16_t[?]',#name+1)
+        for i=1,#name do chars[i-1]=name:byte(i) end
+        local value=ffi.new('uint64_t[8]') -- Opaque, aligned storage for a Qt6 QString.
+        string_new(value,chars,#name)
+        local result=find(parent,value,meta,1)
+        string_free(value)
+        return result~=ffi.NULL and result or nil
+    end
+    local function text(object,get)
+        local value=ffi.new('uint64_t[8]');get(object,value)
+        local buffer=ffi.new('char[512]')
+        local length=kernel.WideCharToMultiByte(65001,0,string_data(value),-1,buffer,512,nil,nil)
+        local result=length>0 and ffi.string(buffer,length-1) or ''
+        string_free(value)
+        return result
+    end
+    return function(main)
+        local root=find_widget(ffi.cast('uintptr_t',main))
+        if root==nil or root==ffi.NULL then return nil end
+        local preview=child(root,'preview');local mode=child(root,'previewScalingMode')
+        local horizontal=child(root,'previewXScrollBar');local vertical=child(root,'previewYScrollBar')
+        if not preview or not mode or not horizontal or not vertical then return nil end
+        local id=window(preview);local rect=ffi.new('im3_menu_rect')
+        if id==0 or user.GetClientRect(ffi.cast('void*',id),rect)==0 then return nil end
+        local selected=index(mode)
+        local dimensions=selected==2 and text(mode,current) or selected==-1 and text(mode,placeholder) or ''
+        local width,height=dimensions:match('(%d+)%D+(%d+)')
+        return {tonumber(id),selected,tonumber(width) or 0,tonumber(height) or 0,
+            -position(horizontal),-position(vertical),tonumber(rect.right-rect.left),tonumber(rect.bottom-rect.top)}
+    end
+end
+local geometry_read,geometry_failed
+local function sample_preview_geometry(main)
+    if not _G.im3_preview_geometry then return end
+    local shared=ffi.cast('volatile double*',_G.im3_preview_geometry)
+    local ok,result=pcall(function()
+        if geometry_failed then return nil end
+        if not geometry_read then geometry_read=preview_geometry_reader() end
+        return geometry_read(main)
+    end)
+    if not ok then geometry_failed=true;result=nil end
+    -- A version guards concurrent readers against a partly written snapshot.
+    shared[0]=shared[0]+1
+    shared[10]=result and 1 or -1
+    if result then for i=1,8 do shared[i+1]=result[i] end end
+    shared[0]=shared[0]+1
+    shared[1]=0
+end
 local mailbox, main_window, window_proc, class_name, window_class
 local instance = kernel.GetModuleHandleA(nil)
 local function report_ui_error(err)
@@ -13690,9 +14825,23 @@ local function initialize_mailbox(main)
     class_name = ffi.new("uint16_t[?]", #name + 1)
     for i = 1, #name do class_name[i-1] = name:byte(i) end
     window_proc = ffi.cast("im3_ui_window_proc_t", function(hwnd, message, wparam, lparam)
-        if message == 0x8349 or message == 0x834A or message == 0x834B then
+        if message==0x834E then
+            sample_preview_geometry(main_window)
+            return 0
+        end
+        if message == 0x8349 or message == 0x834A or message == 0x834B or message==0x834C or message==0x834D then
             local ok, err = pcall(function()
-                if message == 0x834B then
+                if message==0x834C then
+                    projector_exit,escape_game=tonumber(wparam),tonumber(lparam)~=0
+                    if menu_blocked or escape_game or projector_exit~=0 then block_projectors()
+                    else assert(restore(),"Could not restore projector controls") end
+                elseif message==0x834D then
+                    block_projectors()
+                    local foreground=user.GetForegroundWindow()
+                    local root=projector_roots[tostring(ffi.cast("uintptr_t",foreground))]
+                    if root then user.PostMessageW(ffi.cast("void *",root),0x0010,0,0) end
+                    if not menu_blocked and not escape_game and projector_exit==0 then restore() end
+                elseif message == 0x834B then
                     local foreground = user.GetForegroundWindow()
                     if not projectors[tostring(ffi.cast("uintptr_t", foreground))] then
                         assert(focus_preview(main_window) > 0,
@@ -13702,14 +14851,17 @@ local function initialize_mailbox(main)
                     ffi.load("obs-frontend-api").obs_frontend_open_projector(
                         "Preview", tonumber(wparam), nil, nil)
                     if tonumber(lparam) ~= 0 then
+                        menu_blocked=true
                         block_preview(main_window)
-                        block_projectors()
                     end
+                    if menu_blocked or escape_game or projector_exit~=0 then block_projectors() end
                 elseif tonumber(wparam) ~= 0 then
+                    menu_blocked=true
                     block_preview(main_window)
                     block_projectors()
                 else
-                    assert(restore(), "Could not restore the preview menu")
+                    menu_blocked=false
+                    assert(restore(escape_game or projector_exit~=0), "Could not restore the preview menu")
                 end
             end)
             if not ok then report_ui_error(err) end
@@ -13738,6 +14890,7 @@ _G.im3_preview_menu_callback = ffi.cast("void (*)(void *)", function(param)
         if action == 2 then
             return initialize_mailbox(ffi.cast("void *", data[0]))
         elseif action == 3 then
+            menu_blocked,escape_game,projector_exit=false,false,0
             assert(restore(), "Could not restore the preview menu")
             if mailbox ~= nil then
                 assert(user.DestroyWindow(mailbox) ~= 0, "Could not destroy UI message window")
@@ -13748,10 +14901,12 @@ _G.im3_preview_menu_callback = ffi.cast("void (*)(void *)", function(param)
             return 1
         end
         if block then
+            menu_blocked=true
             return block_preview(ffi.cast("void *", data[0])) +
                 block_projectors()
         end
-        return restore() and 1 or 0
+        menu_blocked=false
+        return restore(escape_game or projector_exit~=0) and 1 or 0
     end)
     if not ok then
         if block then pcall(restore) end
@@ -13790,10 +14945,13 @@ local function preview_menu_open(projector_title)
     local state = ffi.C.luaL_newstate()
     if state == nil then return nil, "Could not create isolated UI callback state" end
     local slot = ffi.new("uintptr_t[1]")
+    local geometry=ffi.new('volatile double[11]')
     local ok, err = pcall(function()
         ffi.C.luaL_openlibs(state)
         ffi.C.lua_pushlightuserdata(state, slot)
         ffi.C.lua_setfield(state, -10002, "im3_preview_slot")
+        ffi.C.lua_pushlightuserdata(state,ffi.cast('void*',geometry))
+        ffi.C.lua_setfield(state,-10002,'im3_preview_geometry')
         ffi.C.lua_pushstring(state, projector_title or "")
         ffi.C.lua_setfield(state, -10002, "im3_projector_title")
         local loaded = ffi.C.luaL_loadstring(state, preview_menu_ui_code)
@@ -13806,6 +14964,7 @@ local function preview_menu_open(projector_title)
     if not ok then ffi.C.lua_close(state); return nil, tostring(err) end
     preview_menu_bridge = {
         state = state,
+        geometry=geometry,
         slot = slot,
         callback = ffi.cast("im3_obs_task_t", slot[0])
     }
@@ -13863,6 +15022,65 @@ input_ui_focus_preview = function()
     return true
 end
 
+function input_host.preview_geometry(child,width,height)
+    local bridge=preview_menu_bridge
+    if not bridge or not bridge.window or not bridge.geometry then return nil,false end
+    local shared=bridge.geometry
+    -- Queue a read on the UI thread; never wait for it from a Lua tick.
+    if shared[1]==0 then
+        shared[1]=1
+        if ffi.C.PostMessageW(bridge.window,0x834E,0,0)==0 then shared[1]=0 end
+    end
+    local version=tonumber(shared[0])
+    if version==0 or version%2~=0 then return nil,true end
+    local data={}
+    for i=2,10 do data[i]=tonumber(shared[i]) end
+    if version~=tonumber(shared[0]) then return nil,true end
+    local now=engine_tick_now_ms()
+    if bridge.geometry_version~=version then bridge.geometry_version,bridge.geometry_time=version,now end
+    if data[10]==-1 then return nil,false end
+    if now-(bridge.geometry_time or 0)>250 or data[10]~=1 or
+       ffi.cast('void*',data[2])~=child or width<=0 or height<=0 then return nil,true end
+    local mode,rw,rh,sx,sy,aw,ah=data[3],data[4],data[5],data[6],data[7],data[8],data[9]
+    if aw<=20 or ah<=20 then return nil,true end
+    local scale,left,top
+    if mode==0 then
+        scale=math.min((aw-20)/width,(ah-20)/height)
+        local dw,dh
+        if (aw-20)/(ah-20)>width/height then dw,dh=math.floor((ah-20)*width/height),ah-20
+        else dw,dh=aw-20,math.floor((aw-20)*height/width) end
+        left=10+math.floor((aw-20)/2)-math.floor(dw/2)
+        top=10+math.floor((ah-20)/2)-math.floor(dh/2)
+    else
+        if mode==1 then scale=1
+        elseif mode==2 and rw>0 then scale=rw/width
+        elseif mode==-1 and rw>0 and rh>0 then
+            -- OBS exposes the actual scaled dimensions in its manual zoom
+            -- placeholder. These retain sub-percent precision unlike its label.
+            local low=math.max(rw/width,rh/height)
+            local high=math.min((rw+1)/width,(rh+1)/height)
+            if high<=low then return nil,true end
+            scale=(low+high)/2
+            local level=math.floor(math.log(scale)/math.log(8)*32+.5)
+            local stepped=8^(level/32)
+            if stepped>=low-1e-6 and stepped<high+1e-6 then scale=stepped end
+        else return nil,true end
+        local function truncate(value) return value<0 and math.ceil(value) or math.floor(value) end
+        left=10+truncate((aw-20-width*scale)/2)+sx
+        top=10+truncate((ah-20-height*scale)/2)+sy
+    end
+    return {left=left,top=top,scale=scale,area_width=aw,area_height=ah},true
+end
+
+input_ui_projector_controls=function(key,escape,close)
+    local bridge=preview_menu_bridge
+    if not bridge or not bridge.window then return false,"OBS UI dispatcher is unavailable; reload the engine" end
+    if ffi.C.PostMessageW(bridge.window,close and 0x834D or 0x834C,key,escape)==0 then
+        return false,"Could not queue projector controls"
+    end
+    return true
+end
+
 input_preview_menu_control = function(block)
     if host_os ~= "Windows" then
         if not block then return true end
@@ -13886,6 +15104,11 @@ input_preview_menu_control = function(block)
 end
 
 local function input_preview_menu_release(ctx)
+    if ctx and ctx.input_projector_controls then
+        local ok,err=input_ui_projector_controls(0,0)
+        if not ok then return false,err end
+        ctx.input_projector_controls=nil;ctx.input_projector_last_window=nil
+    end
     if not ctx or not ctx.input_preview_menu_blocked then return true end
     local ok, err = input_preview_menu_control(false)
     if ok then
@@ -14930,6 +16153,38 @@ ANIM_LIB["worker"] = function(ctx, state, args)
     return false, "Native Worker Error: expected expression, label, start, get_result, cancel, remove, or stop_all"
 end
 
+-- Read-only diagnostics. Lua memory belongs to this VM, not exclusively to one
+-- program; world counts include all worlds in this engine instance. No forced GC.
+ANIM_LIB["runtime"] = function(ctx, state, args)
+    if args[1]~="stats" or #args~=2 then
+        return false,"Runtime Error: Expected stats | into:variable or -> | variable"
+    end
+    local target=tostring(args[2] or ""):match("^into:%s*(.+)$")
+    if not target then return false,"Runtime Error: stats needs into:variable or -> | variable" end
+    local stats={lua_kib=collectgarbage("count"),workers_running=0,workers_retained=0,
+        tasks=0,handlers=0,worlds=0,objects=0,connections=0,peers=0}
+    local program=ctx.native_worker_program or ctx
+    for _,job in pairs(program.native_workers or {}) do
+        stats.workers_retained=stats.workers_retained+1
+        if job.phase=="running" or job.phase=="starting" then stats.workers_running=stats.workers_running+1 end
+    end
+    for _ in pairs(ctx.async_tasks or {}) do stats.tasks=stats.tasks+1 end
+    for _ in pairs(ctx.input_handlers or {}) do stats.handlers=stats.handlers+1 end
+    for _,world in pairs(world3d_worlds) do
+        stats.worlds=stats.worlds+1
+        for _ in pairs(world.objects or {}) do stats.objects=stats.objects+1 end
+    end
+    for _,ep in pairs(ctx.tcp_connections or {}) do
+        if ep.state~="closed" then
+            stats.connections=stats.connections+1
+            for _ in pairs(ep.peers or {}) do stats.peers=stats.peers+1 end
+        end
+    end
+    local result=update_variable_state(ctx,target,stats)
+    if is_fatal(result) then return false,result.msg end
+    return true
+end
+
 -- !module | load | path/to/game.lua
 -- A module returns a factory that receives reusable renderer and command hooks.
 local module_command_names = {}
@@ -15506,9 +16761,11 @@ ANIM_LIB["stop"] = function(src, state, args)
         return true
     end
     if target == "all" then
+        if ENGINE_UI then ENGINE_UI.clear(src) end
+        input_host.clear_pending(src)
         if src.input_handlers then INPUT_EVENTS.clear(src) end
         if src.tcp_connections then TCP.close_all(src) end
-        if src.input_preview_menu_blocked then input_preview_menu_release(src) end
+        if src.input_preview_menu_blocked or src.input_projector_controls then input_preview_menu_release(src) end
         if src.native_workers then native_worker_cancel_all(src) end
         for _,world in pairs(world3d_worlds or {}) do world3d_cancel_builds(world) end
         for _, task in ipairs(src.async_tasks or {}) do
@@ -17504,6 +18761,8 @@ function run_code(src, settings)
         return
     end
     INPUT_EVENTS.clear(src)
+    if ENGINE_UI then ENGINE_UI.clear(src) end
+    input_host.clear_pending(src)
     if src.native_workers then native_worker_cancel_all(src) end
     local raw_code = ""
     if src.tcp_connections then TCP.close_all(src) end
@@ -17808,13 +19067,13 @@ function compile_block_text(src, raw_code, ctx_id)
     -- Expand inline control blocks into ordinary queued commands and private
     -- labels. The OBS tick loop charges every body command against its budget.
     local for_number, if_number = 0, 0
-    local function expand_control_blocks(input)
+    local function expand_control_blocks(input,ui_parent)
         local output = {}
         local function emit(value, line)
             output[#output + 1] = {text = value, line = line}
         end
-        local function emit_body(body, line)
-            for _, nested in ipairs(expand_control_blocks(smart_split(body:sub(2, -2)))) do
+        local function emit_body(body, line,child_parent)
+            for _, nested in ipairs(expand_control_blocks(smart_split(body:sub(2, -2)),child_parent or ui_parent)) do
                 emit(nested.text, (line or 1) + (nested.line or 1) - 1)
             end
         end
@@ -17836,7 +19095,37 @@ function compile_block_text(src, raw_code, ctx_id)
             local step_obj = input[index]
             local step_text = safe_trim(step_obj.text or "")
             local replaced = false
-            if step_text:match("^!for%s*|") then
+            if step_text:match('^!ui%s*|') then
+                local parts=split_command_args_safe(step_text:sub(2))
+                local action=parts and safe_trim(parts[2] or '')
+                if action=='frame' or action=='box' or action=='panel' then
+                    local body=parts[#parts] and safe_trim(parts[#parts])
+                    if body and body:match('^%b{}$') and #parts>=4 then
+                        table.remove(parts);parts[2]='panel'
+                        if ui_parent then
+                            local explicit=false
+                            for i=4,#parts do for _,field in ipairs(split_named_attribute_group(parts[i]) or {}) do
+                                if field:match('^%s*parent%s*:') then explicit=true end
+                            end end
+                            if not explicit then parts[#parts+1]='parent:'..ui_parent end
+                        end
+                        emit('!'..table.concat(parts,' | '),step_obj.line)
+                        local before=step_text:sub(1,(step_text:find(body,1,true) or 1)-1)
+                        local _,lines=before:gsub('\n','')
+                        emit_body(body,(step_obj.line or 1)+lines,INPUT_EVENTS.selector(parts[3]))
+                        replaced=true
+                    end
+                end
+                if not replaced and ui_parent and parts and (ENGINE_UI.kinds[action] or action=='frame' or action=='box') then
+                    local explicit=false
+                    for i=4,#parts do for _,field in ipairs(split_named_attribute_group(parts[i]) or {}) do
+                        if field:match('^%s*parent%s*:') then explicit=true end
+                    end end
+                    if not explicit then parts[#parts+1]='parent:'..ui_parent end
+                    emit('!'..table.concat(parts,' | '),step_obj.line);replaced=true
+                end
+            end
+            if not replaced and step_text:match("^!for%s*|") then
                 local parts = split_command_args_safe(step_text:sub(2))
                 if parts and #parts == 2 and safe_trim(parts[1]) == "for" then
                     local header, body = parts[2]:match("^(.-)%s*(%b{})%s*$")
@@ -18031,6 +19320,10 @@ function compile_block_text(src, raw_code, ctx_id)
                 else
                     local cmd = safe_trim(parts[1] or "")
                     table.remove(parts, 1)
+                    -- Unknown command names may resolve to program-owned UI
+                    -- controls at execution time. Preserve callback locations
+                    -- without interpreting function arguments as UI syntax.
+                    if not ANIM_LIB[cmd] then parts._source_line=true_line;parts._source_command=clean_step end
                     if not watch_vars_str and not material_guard then
                         local copied_parts = {}
                         for part_index, part in ipairs(parts) do
@@ -18382,6 +19675,7 @@ function script_tick(fps)
     end
     local tick_budget_ms = math.max(1, math.min(20, tonumber(src.tick_budget_ms) or 6))
     if not src.isInitialized or not src.queue then
+        if ENGINE_UI then ENGINE_UI.clear(src) end
         if src.input_handlers then INPUT_EVENTS.clear(src) end
         if src.native_workers then native_worker_poll_all(src,tick_start_ms+tick_budget_ms*0.15) end
         if src.tcp_connections then TCP.close_all(src) end
@@ -18404,6 +19698,17 @@ function script_tick(fps)
     end
     local main_deadline_ms=tick_deadline_ms-
         (background_pending and math.min(.5,tick_budget_ms*.10) or 0)
+    if next(src.input_watched_mouse or {}) and
+       (src.current_idx<=#src.queue or #(src.call_stack or {})>0 or
+        #(src.async_tasks or {})>0 or next(src.input_handlers or {})) then
+        local ok,accepted,why=pcall(input_host.sample_pending,src)
+        if not ok then why=accepted;accepted=false end
+        if not accepted then
+            generate_stack_trace(src,'Main Execution Loop',src.queue,src.labels,src.call_stack,
+                src.current_idx,src.context_id,why)
+            src.current_idx=#src.queue+1
+        end
+    end
     local animation_start_ms=engine_tick_now_ms()
     if world3d_animation_tick then
         world3d_animation_tick(fps,
@@ -18708,7 +20013,7 @@ function script_tick(fps)
             end
         end
     end
-    if next(src.input_handlers or {}) then
+    if next(src.input_handlers or {}) or src.ui_state then
         local poll_ok,input_ok,input_err=pcall(INPUT_EVENTS.poll,src,fps or .016,main_deadline_ms)
         if not poll_ok then input_err=input_ok;input_ok=false end
         if not input_ok then
@@ -19128,8 +20433,11 @@ function script_tick(fps)
             end
         end
     end
+    local ui_start_ms=engine_tick_now_ms()
+    if src.ui_state then ENGINE_UI.render(src) end
+    src.tick_last_ui_ms=engine_tick_now_ms()-ui_start_ms
     local tick_end_ms = engine_tick_now_ms()
-    src.tick_last_collision_ms = tick_end_ms - collision_start_ms
+    src.tick_last_collision_ms = ui_start_ms - collision_start_ms
     -- Rotate the first background consumer so both kinds make progress when
     -- only a fraction of their usual maximum slice remains.
     local background_start_ms=tick_end_ms
@@ -19151,11 +20459,11 @@ function script_tick(fps)
     src.tick_last_ms = tick_end_ms - tick_start_ms
     src.tick_deadline_ms = nil
     if src.tcp_connections and src.current_idx > #src.queue and #(src.async_tasks or {}) == 0 and
-       not next(src.input_handlers or {}) then
+       not next(src.input_handlers or {}) and not src.ui_state then
         TCP.close_all(src)
     end
-    if src.input_preview_menu_blocked and
-       src.current_idx > #src.queue and #(src.async_tasks or {}) == 0 and not next(src.input_handlers or {}) then
+    if (src.input_preview_menu_blocked or src.input_projector_controls) and
+       src.current_idx > #src.queue and #(src.async_tasks or {}) == 0 and not next(src.input_handlers or {}) and not src.ui_state then
         input_preview_menu_release(src)
     end
     if src.tick_last_ms > math.max(tick_budget_ms * 2, 12) and
@@ -19226,6 +20534,7 @@ function script_load(settings)
             script_is_unloading = true
             obs.utils.obs_closing = true
             obs.utils.script_shutdown = true
+            if ENGINE_UI then ENGINE_UI.clear(src) end
             if src.input_handlers then INPUT_EVENTS.clear(src) end
             if TCP then TCP.shutdown(src) end
             -- OBS is still processing UI events here. Restoring the preview
@@ -19280,6 +20589,7 @@ end
 
 function script_unload()
     obs.utils.script_shutdown = true
+    if src and ENGINE_UI then ENGINE_UI.clear(src) end
     if src and src.input_handlers then INPUT_EVENTS.clear(src) end
     if TCP then TCP.shutdown(src) end
     local menu_ok, menu_err = input_preview_menu_release(src)
