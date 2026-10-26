@@ -243,6 +243,12 @@ data; their internal completion flags are not values for arrow assignment.
 
 `!var` assigns a value. The optional type is `string`, `number`, `bool`, or `table`; an explicit type validates later writes. `local` creates a name in the current call/task scope. Without `local`, writing an existing name updates the scope that owns it; a new name is created in the active scope. Access fields with `player.x` and list elements with `list[1]`. `screen`, `pi`, and `huge` are initialized when a program starts; `screen.width` and `screen.height` are the OBS canvas dimensions. `tick` is supplied after `!wait | frame`.
 
+Type declarations belong to the scope that owns the variable. A local variable
+can have a different type from a same-named caller variable without changing
+the caller's declaration. Execute/restart clears the previous program's types.
+A rejected declaration does not install a type, and assigning an incompatible
+function return value reports a type error.
+
 For a numeric update, `!var | score | ++10 |+|`, `--2`, and `**3` mean add, subtract, and multiply the existing value. The same relative-value notation works in compatible source/movement fields. `--` at the start of a value can be mistaken for a comment if separated incorrectly; put the value after its `|` and prefer an ordinary expression when in doubt.
 
 Use numeric literals, quoted strings, `true`/`false`, variables, and supported expressions in value positions. Examples include `x + speed * tick`, `(score + 1)`, `math.min(a,b)`, comparisons, `and`, and `or`. The engine validates expressions rather than evaluating arbitrary Lua source. A bare unquoted word can be treated as a variable or source name depending on the command; quote display text.
@@ -1219,8 +1225,9 @@ the same grouped/ungrouped syntax, expressions, validation, and style behavior.
 !my_button | -> | same_info |+|           -- omit get for a state record
 !my_button | hide |+|
 !my_button | show |+|
-!my_button | off | click |+|
-!my_button | remove |+|
+!my_button | remove | click |+|    -- remove one event listener
+!my_button | clear |+|             -- clear this widget's listeners
+!my_button | delete |+|            -- delete the widget
 ```
 
 Inputs, frames, checkboxes, sliders, tabs, and labels use the same named form.
@@ -1231,6 +1238,9 @@ A widget's `blur` only clears focus if that widget owns it.
 The older forms remain equivalent: `!ui | set | my_button | text:"Continue"`
 and `!ui | click | my_button | { ... }` still work. Listener replacement and
 removal work across both forms because they address the same control/binding.
+`off` remains a compatibility alias for removing listeners. The older
+`!my_button | remove |+|` (without an event name) still deletes that widget;
+use `delete` in new scripts to make the intent explicit.
 Surface creation, named style definitions, and program-wide UI state/cleanup
 continue to use `!ui`.
 
@@ -1429,10 +1439,19 @@ Programmatic `set`, bound-variable changes, and style changes do not emit
 and does emit `change`. Focus operations may emit `focus`/`blur`.
 
 ```text
-!ui | off | save | click |+|       -- remove one listener
-!ui | off | save |+|               -- remove this control's listeners
-!events | off | ui |+|             -- remove UI listeners, keep controls
+!save_button | remove | click |+|  -- remove one listener, keep the widget
+!save_button | clear |+|           -- clear this widget's listeners
+!ui | remove | save_button | click |+| -- equivalent explicit form
+!ui | clear | save_button |+|      -- equivalent explicit form
+!events | clear | ui |+|           -- clear all UI listeners, keep controls
 ```
+
+`clear` accepts an optional event name; use `remove | event_name` to remove a
+particular listener. Both accept `all` to clear every listener on that widget.
+They cancel matching active/pending callbacks as well as future
+notifications. Unknown event names report an error without deleting a widget.
+`!save_button | delete |+|` (or `!ui | delete | save_button |+|`) deletes the
+control. `!ui | clear |+|` without a widget name clears the complete UI.
 
 ### Text editing, navigation, and reading state
 
@@ -1477,7 +1496,7 @@ backends.
 !play | text:"Continue",enabled:true |+|
 !form | hide |+|
 !form | show |+|
-!form | remove |+|                  -- removes descendants and their listeners
+!form | delete |+|                  -- deletes descendants and their listeners
 !ui | update |+|                    -- optional immediate drawing/publication
 !ui | clear |+|                     -- remove all UI surfaces/controls/listeners
 ```
@@ -1591,9 +1610,9 @@ Registering the same normalized key/action again replaces its previous handler
 and cancels its active/pending callback. Other key/actions keep their handlers.
 
 ```text
-!input | off | SPACE | press |+|  -- remove only Space's press handler
-!input | off | SPACE |+|          -- remove all Space handlers
-!input | off | all |+|            -- remove this program's input handlers
+!input | remove | SPACE | press |+| -- remove only Space's press handler
+!input | remove | SPACE |+|         -- remove all Space handlers
+!input | clear | all |+|            -- clear this program's input handlers
 ```
 
 `off` does not unregister `!onpress` hotkeys or disable polling. A fatal callback
@@ -1642,9 +1661,9 @@ event-only program does not accumulate unused polling data. Continue reading
 polling streams once per frame when combining the forms. Existing platform
 limitations for wheel and text input still apply.
 
-Use `!input | off | move/wheel/text |+|` (choose one action), or
-`!input | off | focus | lost |+|` to remove one focus direction.
-`!input | off | all |+|` removes input handlers only; worker, connection, and
+Use `!input | remove | move/wheel/text |+|` (choose one action), or
+`!input | remove | focus | lost |+|` to remove one focus direction.
+`!input | clear | all |+|` removes input handlers only; worker, connection, and
 other registered event handlers remain active.
 
 ### Pointer control and platform support
@@ -1906,21 +1925,23 @@ collision pairs have separate pending entries. Different callbacks may interleav
 when they yield; no cross-handler execution order is guaranteed.
 
 ```text
-!events | off | worker | calculation | done |+|
-!events | off | connection | game | message |+|
-!events | off | world3d | terrain_mesh |+|
-!events | off | change | health |+|
-!events | off | collision | PlayerSource | WallSource |+|
-!events | off | collision |+|
-!events | off | all |+|
+!events | remove | worker | calculation | done |+|
+!events | remove | connection | game | message |+|
+!events | remove | world3d | terrain_mesh |+|
+!events | remove | change | health |+|
+!events | remove | collision | PlayerSource | WallSource |+|
+!events | clear | collision |+|
+!events | clear | all |+|
 ```
 
 Families are `input`, `worker`, `connection`, `world3d`, `animation`, `change`,
-and `collision`. The selector and event kind are optional. Use normalized keys
+`collision`, and `ui`. The selector and event kind are optional. Use normalized keys
 and kinds in this general cleanup form (`join/leave` for connection aliases).
 For a specific collision binding, supply its two source selectors instead.
-`!input | off` is a shortcut for removing input handlers. `!events | off` removes
+`!input | remove` is a shortcut for removing input handlers. `!events | clear` removes
 block handlers only, leaving older label listeners and OBS hotkeys unchanged.
+`clear` and `remove` are equivalent cleanup actions here; the older `off` action
+remains supported by both `!input` and `!events`.
 Stopping all script work, Execute/restart, fatal main-program failure, and unload
 clear all block handlers. Registered handlers keep the program alive after its
 main statements end, including its open connections.
@@ -2596,6 +2617,9 @@ yet submitted to TLS/socket output; `buffered_bytes` includes engine TLS buffers
 and event metadata too. Invalid syntax raises an engine error. Busy ports,
 unavailable TLS, refused connections, and handshake failures become status/error
 events. Check `into`/`last_send_error` when sending before authentication.
+Sending to a peer that has disconnected reports `ok:0` with `No connected recipients`
+and sets `last_send_error`; it does not stop the program. Invalid command arguments
+still report errors.
 
 ### Clipboard access
 
@@ -2639,6 +2663,41 @@ order, but games define authority, synchronization, and interpolation.
 
 LAN/internet use the same commands if the firewall/router allows reaching the
 host; the engine does not configure either or provide router traversal.
+
+## Fetching data and optional Lua modules
+
+```text
+!fetch | "https://example.test/data.json" | -> | response |+|
+!module | load | helpers.lua |+|
+```
+
+`!fetch` accepts HTTP/HTTPS URLs and uses the host's existing `curl` executable.
+It waits cooperatively, checks HTTPS certificates, restricts redirects to
+HTTP/HTTPS, and limits each request to 20 seconds. A request failure or timeout
+reports an error instead of assigning an empty successful response. The
+positional destination form `!fetch | url | response |+|` also works. A decoded
+JSON object/array is returned when parsing succeeds; otherwise the response is
+text. Temporary helper files are removed when the request completes or times out.
+
+An optional Lua module returns an installer function. Its command registrations
+are published together only after installation succeeds:
+
+```lua
+return function(api)
+    api.register_command("greet", function(ctx, state, args)
+        api.obslua.script_log(api.obslua.LOG_INFO, tostring(args[1]))
+        return true
+    end, false)
+end
+```
+
+The last argument to `register_command` selects raw arguments (`true`) or
+evaluated arguments (`false`); the choice belongs to that program's registration.
+Loading another program's module cannot change it. The engine's Lua command
+registry is named `engine`, with argument policies in `engine_raw`. Use the
+module's registration API for extensions. These Lua names do not change the
+language's `!command | ... |+|` syntax. Lua modules run inside OBS; load only
+modules you trust.
 
 ## Command reference
 
