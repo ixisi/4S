@@ -1,5 +1,5 @@
-ANIM_LIB = {};
-ANIM_LIB_RAW = {};
+engine = {};
+engine_raw = {};
 SCRIPT_FUNCS = {};
 src = {}
 auto_cleanup = {};
@@ -1325,7 +1325,7 @@ function compile_line(cmd, args)
         if not result_error and not own_arrow then
             args={}
             for index=1,arrow_index-1 do args[index]=original_args[index] end
-            if ANIM_LIB[cmd] then
+            if engine[cmd] then
                 local action=tostring(args[1] or ""):lower()
                 local field
                 if cmd=="connection" or cmd=="websocket" or cmd=="network" then
@@ -1441,7 +1441,7 @@ function compile_line(cmd, args)
     }
 
     local function process_args(src, raw_args)
-        if ANIM_LIB_RAW and ANIM_LIB_RAW[cmd] then
+        if engine_raw and engine_raw[cmd] then
             return raw_args
         end
 
@@ -1456,13 +1456,13 @@ function compile_line(cmd, args)
         return runtime_args
     end
 
-    if ANIM_LIB[cmd] then
-        local preset_func = ANIM_LIB[cmd]
+    if engine[cmd] then
+        local preset_func = engine[cmd]
         if cmd=="var" and preset_func==COMPILED_VAR_BASE and compile_variable_assignment then
             local assignment=compile_variable_assignment(args)
             if assignment then return assignment end
         end
-        local raw_args = ANIM_LIB_RAW and ANIM_LIB_RAW[cmd]
+        local raw_args = engine_raw and engine_raw[cmd]
         if raw_args == nil then
             raw_args = raw_runtime_arg_commands[cmd] or
                 not evaluated_builtin_arg_commands[cmd]
@@ -1539,7 +1539,7 @@ function compile_line(cmd, args)
     -- fallback object method invocation
     local widget_command
     return function(src, override_state)
-        local dynamic_command=ANIM_LIB[cmd]
+        local dynamic_command=engine[cmd]
         if dynamic_command then
             if result_target then return false,"Result Error: This dynamically registered command does not declare an output form" end
             local dynamic_args=process_args(src,args)
@@ -1692,12 +1692,18 @@ function update_variable_state(src, var_name, var_value, explicit_type, force_lo
     if not src.type_registry then
         src.type_registry = {}
     end
-    if explicit_type then
-        src.type_registry[root_var] = explicit_type
+    local target_scope, existing_root
+    if force_local and not var_name:find("%.") and not var_name:find("%[") then
+        target_scope=src.active_scope
+    else
+        target_scope,existing_root=retrieve_scope(src.active_scope,root_var)
     end
-
-    if src.type_registry[root_var] then
-        local expected = src.type_registry[root_var]
+    if force_local or not target_scope then target_scope=src.active_scope end
+    local scope_types=src.scope_type_registry and src.scope_type_registry[target_scope]
+    local declared=explicit_type or scope_types and scope_types[root_var] or
+        (not force_local and src.type_registry[root_var])
+    if declared then
+        local expected = declared
         local actual = type(resolved_val)
         if actual == "boolean" then
             actual = "bool"
@@ -1728,23 +1734,6 @@ function update_variable_state(src, var_name, var_value, explicit_type, force_lo
                     root_var .. "'"
             }
         end
-    end
-
-    local target_scope, existing_root
-    -- A simple forced local write cannot use an inherited value. Avoid walking
-    -- every parent/argument scope for loop iterators and local temporaries.
-    -- Local child writes still need the inherited table for their deep copy.
-    if force_local and not var_name:find("%.") and not var_name:find("%[") then
-        target_scope=src.active_scope
-    else
-        target_scope,existing_root=retrieve_scope(src.active_scope,root_var)
-    end
-
-    -- Default engine behavior:
-    -- update first existing variable found in scope chain,
-    -- unless caller explicitly forces a local declaration.
-    if force_local or not target_scope then
-        target_scope = src.active_scope
     end
 
     if var_name:find("%.") or var_name:find("%[") then
@@ -1818,6 +1807,13 @@ function update_variable_state(src, var_name, var_value, explicit_type, force_lo
         end
     end
 
+    if explicit_type then
+        -- A local declaration must not change a same-named caller variable's
+        -- type. Weak keys release metadata when a function/task scope expires.
+        src.scope_type_registry=src.scope_type_registry or setmetatable({},{__mode='k'})
+        scope_types=scope_types or {};scope_types[root_var]=explicit_type
+        src.scope_type_registry[target_scope]=scope_types
+    end
     return true
 end
 
@@ -1915,12 +1911,12 @@ function lerp(a, b, t)
     return a + (b - a) * t
 end
 
-ANIM_LIB["easing"] = function(src, state, args)
+engine["easing"] = function(src, state, args)
     src.current_easing = resolve_path(src, args[1]) or args[1] or "linear"
     return true
 end
 -- !wait | duration_or_var
-ANIM_LIB["wait"] = function(src, state, args)
+engine["wait"] = function(src, state, args)
     local raw_time = args[1]
     -- A frame yield resumes on the next OBS video tick. Millisecond waits
     -- can occasionally span two ticks when their threshold is close to the
@@ -1969,7 +1965,7 @@ ANIM_LIB["wait"] = function(src, state, args)
         return false
     end
 end
-ANIM_LIB["transition"] = function(src, state, args)
+engine["transition"] = function(src, state, args)
     local scene_name = resolve_path(src, args[1])
     if scene_name == nil or is_fatal(scene_name) then scene_name = args[1] end
     local trans_type = args[2] and resolve_path(src, args[2]) or nil
@@ -1998,7 +1994,7 @@ ANIM_LIB["transition"] = function(src, state, args)
     return true
 end
 
-ANIM_LIB["switch"] = function(src, state, args)
+engine["switch"] = function(src, state, args)
     local scene_name = resolve_path(src, args[1])
     if scene_name == nil or is_fatal(scene_name) then scene_name = args[1] end
 
@@ -2013,7 +2009,7 @@ ANIM_LIB["switch"] = function(src, state, args)
     return true
 end
 
-ANIM_LIB["array.push"] = function(src, state, args)
+engine["array.push"] = function(src, state, args)
     local arr_name = args[1]
     if type(arr_name) == "string" and arr_name:find("%(") then
         arr_name = arr_name:gsub("(%b())", function(match_block)
@@ -2046,7 +2042,7 @@ ANIM_LIB["array.push"] = function(src, state, args)
     table.insert(target_array, resolved_val)
     return true
 end
-ANIM_LIB["array.pop"] = function(src, state, args)
+engine["array.pop"] = function(src, state, args)
     local array_name = args[1]
     local save_var = args[2]
     local target_array = resolve_path(src, array_name)
@@ -2061,7 +2057,7 @@ ANIM_LIB["array.pop"] = function(src, state, args)
     return true
 end
 
-ANIM_LIB["array.remove"] = function(src, state, args)
+engine["array.remove"] = function(src, state, args)
     local array_name = args[1]
     if type(array_name) == "string" and array_name:find("%(") then
         array_name = array_name:gsub("(%b())", function(match_block)
@@ -2081,13 +2077,13 @@ ANIM_LIB["array.remove"] = function(src, state, args)
     end
     return true
 end
-ANIM_LIB["array.clear"] = function(src, state, args)
+engine["array.clear"] = function(src, state, args)
     local arr_name = args[1]
     update_variable_state(src, arr_name, {})
     return true
 end
 -- !array.copy | destination_table | source_table
-ANIM_LIB["array.copy"] = function(src,state,args)
+engine["array.copy"] = function(src,state,args)
     local target=tostring(args[1] or "")
     local source=resolve_path(src,tostring(args[2] or ""))
     if target=="" or type(source)~="table" then
@@ -2098,7 +2094,7 @@ ANIM_LIB["array.copy"] = function(src,state,args)
     return true
 end
 -- !array.shift | table | first_destination_index | last_destination_index
-ANIM_LIB["array.shift"] = function(src,state,args)
+engine["array.shift"] = function(src,state,args)
     local array=resolve_path(src,tostring(args[1] or ""))
     if type(array)~="table" then return false,"Array Error: shift needs a table variable" end
     local first=evaluate_math(src,tostring(args[2] or ""))
@@ -2114,7 +2110,7 @@ ANIM_LIB["array.shift"] = function(src,state,args)
     return true
 end
 
-ANIM_LIB["foreach"] = function(src, state, args)
+engine["foreach"] = function(src, state, args)
     local arr_name = args[1]
     local iter_name = args[2]
     local target_label = args[3]
@@ -2163,7 +2159,7 @@ ANIM_LIB["foreach"] = function(src, state, args)
     return true
 end
 -- !detach | target_type (collision, spawn, pin, onpress, or empty for all)
-ANIM_LIB["detach"] = function(src, state, args)
+engine["detach"] = function(src, state, args)
 
     local target_type = args[1]
     if type(target_type) == "string" then
@@ -2324,7 +2320,7 @@ ANIM_LIB["detach"] = function(src, state, args)
     return true
 end
 
-ANIM_LIB["onpress"] = function(src, state, args)
+engine["onpress"] = function(src, state, args)
     local hotkey_name = args[1]
     local target_label = args[2]
     local target_label2 = args[3]
@@ -2415,7 +2411,7 @@ ANIM_LIB["onpress"] = function(src, state, args)
 end
 
 -- broken have to re-write it again!
-ANIM_LIB["filter"] = function(src, state, args)
+engine["filter"] = function(src, state, args)
     if #args < 5 or args[5] == nil or args[5] == "" then
         local target_name = resolve_path(src, args[1]) or args[1]
         local filter_name = resolve_path(src, args[2]) or args[2]
@@ -2496,7 +2492,7 @@ ANIM_LIB["filter"] = function(src, state, args)
     end
     return false
 end
-ANIM_LIB["move"] = function(src, state, args)
+engine["move"] = function(src, state, args)
     local targets = src.active_sources or {src.scene_item}
     if #targets == 0 then
         return true
@@ -2625,7 +2621,7 @@ ANIM_LIB["move"] = function(src, state, args)
 end
 -- !clones | remove
 -- !clones | target_name_or_index | remove
-ANIM_LIB["clones"] = function(src, state, args)
+engine["clones"] = function(src, state, args)
     local arg1 = args[1]
     local arg2 = args[2]
 
@@ -2721,9 +2717,21 @@ ANIM_LIB["clones"] = function(src, state, args)
     return true
 end
 
-ANIM_LIB["fetch"] = function(src, state, args)
+local function fetch_quote(value,windows)
+    if windows then return '"'..value:gsub('%%','%%%%'):gsub('"','%%22')..'"' end
+    return "'"..value:gsub("'","'\\''").."'"
+end
+engine["fetch"] = function(src, state, args)
     if not state.init then
-        state.url = resolve_path(src, args[1]) or args[1]
+        local url=resolve_path(src,args[1])
+        if is_fatal(url) or url==nil then url=args[1] end
+        if type(url)~='string' or url:find('%c') or not url:match('^https?://[^/]+') then
+            return false,'Fetch Error: Expected an HTTP or HTTPS URL without control characters'
+        end
+        if type(args[2])~='string' or args[2]:match('^%s*$') then
+            return false,'Fetch Error: Expected a destination variable'
+        end
+        state.url=url
         state.save_var = args[2]
         state.fetch_id = tostring(os.clock()):gsub("%.", "") .. tostring(math.random(1000, 9999))
         local is_win = package.config:sub(1, 1) == "\\"
@@ -2733,39 +2741,37 @@ ANIM_LIB["fetch"] = function(src, state, args)
         state.temp_done = temp_dir .. "/4im3_" .. state.fetch_id .. ".done"
         state.temp_script = temp_dir .. "/4im3_" .. state.fetch_id .. (is_win and ".bat" or ".sh")
         ACTIVE_FETCH_FILES[state.fetch_id] = {state.temp_json, state.temp_done, state.temp_script}
+        local request='curl --fail --silent --show-error --location --proto "=http,https" --proto-redir "=http,https" --connect-timeout 10 --max-time 20 --url '
         if is_win then
             local win_json = state.temp_json:gsub("/", "\\")
             local win_done = state.temp_done:gsub("/", "\\")
             local win_script = state.temp_script:gsub("/", "\\")
 
             local bat = io.open(state.temp_script, "w")
-            if bat then
-                bat:write("@echo off\n")
-                bat:write(string.format('curl -sLk -A "Mozilla/5.0" "%s" -o "%s"\n', state.url, win_json))
-                bat:write(string.format('echo 1 > "%s"\n', win_done))
-                bat:write("exit\n")
-                bat:close()
-            end
-
-            os.execute('start /MIN "" "' .. win_script .. '"')
+            if not bat then ACTIVE_FETCH_FILES[state.fetch_id]=nil;return false,'Fetch Error: Cannot create request script' end
+            bat:write('@echo off\nsetlocal DisableDelayedExpansion\n')
+            bat:write(request..fetch_quote(state.url,true)..' --output '..fetch_quote(win_json,true)..'\n')
+            bat:write('echo %errorlevel% > '..fetch_quote(win_done,true)..'\n')
+            bat:close()
+            os.execute('start "" /B cmd.exe /D /V:OFF /C ""'..win_script..'""')
         else
             local sh = io.open(state.temp_script, "w")
-            if sh then
-                sh:write("#!/bin/bash\n")
-                sh:write(string.format('curl -sLk -A "Mozilla/5.0" "%s" -o "%s"\n', state.url, state.temp_json))
-                sh:write(string.format('touch "%s"\n', state.temp_done))
-                sh:close()
-            end
-            os.execute('chmod +x "' .. state.temp_script .. '" && ./"' .. state.temp_script .. '" &')
+            if not sh then ACTIVE_FETCH_FILES[state.fetch_id]=nil;return false,'Fetch Error: Cannot create request script' end
+            sh:write('#!/bin/sh\n')
+            sh:write(request..fetch_quote(state.url,false)..' --output '..fetch_quote(state.temp_json,false)..'\n')
+            sh:write('printf "%s" "$?" > '..fetch_quote(state.temp_done,false)..'\n')
+            sh:close()
+            os.execute('sh '..fetch_quote(state.temp_script,false)..' >/dev/null 2>&1 &')
         end
 
-        state.start_time = os.clock()
+        state.start_time = engine_tick_now_ms()
         state.init = true
         return false
     end
 
     local done_file = io.open(state.temp_done, "r")
     if done_file then
+        local exit_code=tonumber(done_file:read('*a'))
         done_file:close()
 
         local json_file = io.open(state.temp_json, "r")
@@ -2779,6 +2785,7 @@ ANIM_LIB["fetch"] = function(src, state, args)
         os.remove(state.temp_done)
         os.remove(state.temp_script)
         ACTIVE_FETCH_FILES[state.fetch_id] = nil
+        if exit_code~=0 then return false,'Fetch Error: HTTP request failed (curl exit '..tostring(exit_code or 'unknown')..')' end
 
         local final_data = result
         if result and type(result) == "string" and (result:match("^%s*{") or result:match("^%s*%[")) then
@@ -2794,13 +2801,13 @@ ANIM_LIB["fetch"] = function(src, state, args)
         return true
     end
 
-    if (os.clock() - state.start_time) > 20 then
+    if engine_tick_now_ms()-state.start_time > 21000 then
         obslua.script_log(obslua.LOG_WARNING, "[4IM3-SCRIPT] Fetch timed out for URL: " .. tostring(state.url))
         os.remove(state.temp_json)
         os.remove(state.temp_done)
         os.remove(state.temp_script)
         ACTIVE_FETCH_FILES[state.fetch_id] = nil
-        return true
+        return false,'Fetch Error: Request timed out'
     end
 
     return false
@@ -2809,7 +2816,7 @@ end
 -- !use_sources | obj1 | obj2 | obj3 ...
 -- Legacy alias: !source. With no names, restores the original source.
 
-ANIM_LIB["source"] = function(src, state, args)
+engine["source"] = function(src, state, args)
     if #args == 0 or (args[1] == "" and #args == 1) then
         if src.active_sources then
             for _, old_src in ipairs(src.active_sources) do
@@ -2893,7 +2900,7 @@ ANIM_LIB["source"] = function(src, state, args)
 
     return true
 end
-ANIM_LIB["use_sources"] = ANIM_LIB["source"]
+engine["use_sources"] = engine["source"]
 
 local function resolve_loop_target(labels, global_registry, target_label)
     if not target_label then
@@ -3067,7 +3074,7 @@ local function for_owner(src)
     return src.current_task or src
 end
 
-ANIM_LIB["__for_start"] = function(src, state, args)
+engine["__for_start"] = function(src, state, args)
     local id, kind, name = args[1], args[2], args[3]
     local owner = for_owner(src)
     owner.for_frames = owner.for_frames or {}
@@ -3096,7 +3103,7 @@ ANIM_LIB["__for_start"] = function(src, state, args)
     return true
 end
 
-ANIM_LIB["__for_check"] = function(src, state, args)
+engine["__for_check"] = function(src, state, args)
     local owner = for_owner(src)
     local frame = owner.for_frames and owner.for_frames[args[1]]
     if not frame then return false, "For Error: loop state was lost" end
@@ -3116,7 +3123,7 @@ ANIM_LIB["__for_check"] = function(src, state, args)
     return true
 end
 
-ANIM_LIB["__for_next"] = function(src, state, args)
+engine["__for_next"] = function(src, state, args)
     local owner = for_owner(src)
     local frame = owner.for_frames and owner.for_frames[args[1]]
     if not frame then return false, "For Error: loop state was lost" end
@@ -3125,13 +3132,13 @@ ANIM_LIB["__for_next"] = function(src, state, args)
     return "JUMP", args[2]
 end
 
-ANIM_LIB["for"] = function()
+engine["for"] = function()
     return false, "For Error: expected !for | item in table { commands } or !for | i from first to last { commands }"
 end
 
 -- !loop | count | target_label_or_block
 
-ANIM_LIB["loop"] = function(src, state, args)
+engine["loop"] = function(src, state, args)
     if not args[1] or args[1] == "" then
         return "RESET"
     end
@@ -3199,7 +3206,7 @@ ANIM_LIB["loop"] = function(src, state, args)
 end
 
 -- !label | name
-ANIM_LIB["label"] = function(src, state, args)
+engine["label"] = function(src, state, args)
     return true
 end
 
@@ -3207,7 +3214,7 @@ end
 -- !if | prop.key | operator | value_or_var | jump_label
 -- !if | val1 | op | val2 | label_OR_@function
 -- !if | val1 | label_OR_@function
-ANIM_LIB["if"] = function(src, state, args)
+engine["if"] = function(src, state, args)
     local target_label = nil
     local mode = nil
     local condition_expr = nil
@@ -3311,14 +3318,14 @@ end
 
 -- Internal branch used by compiled inline !if blocks. Reuse the existing
 -- condition rules so numeric zero, booleans, and strict errors stay identical.
-ANIM_LIB["__if_false"] = function(src, state, args)
-    local result, target = ANIM_LIB["if"](src, state, {args[1], args[2]})
+engine["__if_false"] = function(src, state, args)
+    local result, target = engine["if"](src, state, {args[1], args[2]})
     if result == false then return false, target end
     if result == "JUMP" then return true end
     return "JUMP", args[2]
 end
 
-ANIM_LIB["else"] = function()
+engine["else"] = function()
     return false, "If Error: !else must immediately follow an inline !if block"
 end
 
@@ -3333,7 +3340,7 @@ local function resolve_media_arg(src, raw)
     return resolved
 end
 
-ANIM_LIB["media"] = function(src, state, args)
+engine["media"] = function(src, state, args)
     local target_name = resolve_media_arg(src, args[1])
     local action = resolve_media_arg(src, args[2])
     local value = resolve_media_arg(src, args[3])
@@ -3366,7 +3373,7 @@ end
 
 -- !media_wait | media_source | absolute_playback_time
 -- Use the media source's playhead so chained waits do not accumulate tick drift.
-ANIM_LIB["media_wait"] = function(src, state, args)
+engine["media_wait"] = function(src, state, args)
     local target_name = resolve_media_arg(src, args[1])
     local raw_target = resolve_media_arg(src, args[2])
     if type(target_name) ~= "string" or target_name == "" then
@@ -3403,7 +3410,7 @@ end
 
 -- !media_time | media_source | number_variable
 -- Capture the current media playhead for input timing and other live cues.
-ANIM_LIB["media_time"] = function(src, state, args)
+engine["media_time"] = function(src, state, args)
     local target_name = resolve_media_arg(src, args[1])
     local var_name = args[2]
     if type(target_name) ~= "string" or target_name == "" then
@@ -3500,7 +3507,7 @@ local function parse_table_literal(src, literal, depth)
     return result
 end
 
-ANIM_LIB["var"] = function(src, state, args)
+engine["var"] = function(src, state, args)
     local raw_var_name = args[1]
     local raw_val = args[2]
 
@@ -3634,7 +3641,7 @@ end
 
 -- Compile ordinary assignment syntax once, just like expressions. Resolution
 -- and checked writes still happen at execution time in the current scope.
-COMPILED_VAR_BASE=ANIM_LIB.var
+COMPILED_VAR_BASE=engine.var
 function compile_variable_assignment(args)
     if #args~=2 or type(args[1])~="string" or args[2]==nil then return nil end
     local original_name,raw_value=args[1],args[2]
@@ -3685,7 +3692,7 @@ function compile_variable_assignment(args)
 end
 
 -- !save | memory_var_name |+|
-ANIM_LIB["save"] = function(src, state, args)
+engine["save"] = function(src, state, args)
     local var_name = args[1]
     if type(var_name) == "string" then
         var_name = var_name:match("^%s*(.-)%s*$")
@@ -3715,7 +3722,7 @@ end
 
 -- !load | memory_var_name | fallback_default_value |+|
 
-ANIM_LIB["load"] = function(src, state, args)
+engine["load"] = function(src, state, args)
     local raw_var_name = args[1]
     local default_val = args[2]
 
@@ -3780,7 +3787,7 @@ end
 
 -- !jump | LABEL_NAME
 
-ANIM_LIB["jump"] = function(src, state, args)
+engine["jump"] = function(src, state, args)
     if not args or #args < 1 then
         return false, "Jump Error: !jump requires a target label"
     end
@@ -3819,7 +3826,7 @@ ANIM_LIB["jump"] = function(src, state, args)
 end
 -- !call | LABEL_NAME
 
-ANIM_LIB["call"] = function(src, state, args)
+engine["call"] = function(src, state, args)
     -- obslua.script_log(obslua.LOG_WARNING, "[DEBUG CALL ARGS] " .. tostring(args[1]) .. " | " .. tostring(args[2]) .. " | " .. tostring(args[3]) .. " | " .. tostring(args[4]))
     if not args or #args < 1 then
         return false, "Call Error: !call requires a target label"
@@ -3940,7 +3947,7 @@ ANIM_LIB["call"] = function(src, state, args)
 end
 
 -- !attach | target_source | label_name
-ANIM_LIB["attach"] = function(src, state, args)
+engine["attach"] = function(src, state, args)
     local target_item = SCRIPT_FUNCS.source(src, args[1])
     local target_label = args[2]
 
@@ -3976,7 +3983,7 @@ ANIM_LIB["attach"] = function(src, state, args)
     return true
 end
 
-ANIM_LIB["change"] = function(src, state, args)
+engine["change"] = function(src, state, args)
     if args._input_handler or INPUT_EVENTS and INPUT_EVENTS.is_handler('change',args) then
         return INPUT_EVENTS.register(src,args,'change')
     end
@@ -4014,7 +4021,7 @@ ANIM_LIB["change"] = function(src, state, args)
     })
     return true
 end
-ANIM_LIB["return"] = function(src, state, args)
+engine["return"] = function(src, state, args)
     if not args or #args == 0 then
         return "RETURN", nil
     end
@@ -4078,7 +4085,7 @@ ANIM_LIB["return"] = function(src, state, args)
 end
 
 -- !template | template_name
-ANIM_LIB["template"] = function(ctx, state, args)
+engine["template"] = function(ctx, state, args)
     local t_name = args[1]
     if not t_name or type(t_name) ~= "string" then
         return true
@@ -4099,7 +4106,7 @@ ANIM_LIB["template"] = function(ctx, state, args)
 end
 
 -- !delete |+|
-ANIM_LIB["delete"] = function(src, state, args)
+engine["delete"] = function(src, state, args)
     local targets = src.active_sources or {src.scene_item}
 
     for _, item in ipairs(targets) do
@@ -4142,7 +4149,7 @@ end
 
 -- !collision | obj1 | obj2 | label
 
-ANIM_LIB["collision"] = function(ctx, state, args)
+engine["collision"] = function(ctx, state, args)
     if args and (args._input_handler or INPUT_EVENTS and INPUT_EVENTS.is_handler('collision',args)) then
         local ok,binding=INPUT_EVENTS.register(ctx,args,'collision')
         if not ok then return false,binding end
@@ -4398,7 +4405,7 @@ local function shader_selection(raw,texture_raw,ctx)
             texture_path=texture_path}
 end
 -- !shader | select | renderer_source_name | effect_path | optional_texture_path
-ANIM_LIB["shader"] = function(ctx,state,args)
+engine["shader"] = function(ctx,state,args)
     if tostring(args[1] or "")~="select" then
         return false,"Shader Error: Expected select | source_name | effect_path | optional_texture_path"
     end
@@ -5652,7 +5659,7 @@ end
 -- Legacy alias: !renderer | ensure | source_name | kind | width | height | scale
 -- Creates a direct item in the active scene, or configures an existing item
 -- with the same name and source type. A name collision of another type fails.
-ANIM_LIB["renderer"] = function(ctx, state, args)
+engine["renderer"] = function(ctx, state, args)
     local function fail(message)
         local detail = "Renderer Error: " .. message
         obslua.script_log(obslua.LOG_ERROR, "[4IM3-SCRIPT] " .. detail)
@@ -7765,7 +7772,7 @@ function world3d_queue_mesh(ctx,world,fields,action,asynchronous)
                 prepared.vars[variable]=value
                 args[#args+1]=key..":"..(key=="view" and ("("..variable..")") or variable)
             end
-            local ok,problem=ANIM_LIB.world3d(prepared,{},args)
+            local ok,problem=engine.world3d(prepared,{},args)
             if not ok then error(problem) end
         end
         local object=shadow.objects[name]
@@ -7836,7 +7843,7 @@ function world3d_mesh_tick(deadline)
         if not running then break end
     end
 end
-ANIM_LIB["world3d"] = function(ctx, state, args)
+engine["world3d"] = function(ctx, state, args)
     if args._input_handler or INPUT_EVENTS and INPUT_EVENTS.is_handler('world3d',args) then
         return INPUT_EVENTS.register(ctx,args,'world3d')
     end
@@ -9769,12 +9776,12 @@ function INPUT_EVENTS.poll(ctx,seconds,deadline)
         local wheel,text=0,''
         for kind,buffers in pairs(ctx.input_event_streams or {}) do buffers.poll=kind=='wheel' and 0 or '' end
         if INPUT_EVENTS.enabled(ctx,'wheel') then
-            local ok,why=ANIM_LIB.input(history,{}, {'wheel','_event_wheel'})
+            local ok,why=engine.input(history,{}, {'wheel','_event_wheel'})
             if not ok then return false,why end
             wheel=history.active_scope._event_wheel
         end
         if INPUT_EVENTS.enabled(ctx,'text') then
-            local ok,why=ANIM_LIB.input(history,{}, {'text','_event_text'})
+            local ok,why=engine.input(history,{}, {'text','_event_text'})
             if not ok then return false,why end
             text=history.active_scope._event_text
         end
@@ -9829,13 +9836,13 @@ function INPUT_EVENTS.off(ctx,family,key,kind)
     for _,binding in pairs(ctx.input_handlers or {}) do if binding.code.family=='input' then input_remains=true;break end end
     if not input_remains and not ctx.ui_state then ctx.input_event_streams=nil;ctx.input_event_poll=nil end
 end
-ANIM_LIB.events=function(ctx,state,args)
+engine.events=function(ctx,state,args)
     local family=tostring(args[2] or '')
-    if args[1]~='off' or #args<2 or #args>4 or
+    if not ({clear=true,remove=true,off=true})[args[1]] or #args<2 or #args>4 or
        not ({all=true,input=true,worker=true,connection=true,world3d=true,animation=true,change=true,collision=true,ui=true})[family] then
-        return false,'Event Error: Expected events | off | all, or off | family | optional selector | optional event kind'
+        return false,'Event Error: Expected events | clear | all, or remove | family | optional selector | optional event kind'
     end
-    if family=='all' and #args~=2 then return false,'Event Error: off | all takes no selector' end
+    if family=='all' and #args~=2 then return false,'Event Error: clear/remove | all takes no selector' end
     if family=='all' then INPUT_EVENTS.clear(ctx)
     elseif family=='collision' and args[3] and args[4] then INPUT_EVENTS.off(ctx,family,args[3]..'|'..args[4])
     else INPUT_EVENTS.off(ctx,family,args[3] and INPUT_EVENTS.selector(args[3]),args[4]) end
@@ -9877,10 +9884,10 @@ for _,key in ipairs({
     {"/",0xBF,"/","?"},{"`",0xC0,"`","~"},
     {"BACKSPACE",0x08,"\b","\b"},
 }) do input_text_keys[#input_text_keys+1]=key end
-ANIM_LIB["input"] = function(ctx,state,args)
+engine["input"] = function(ctx,state,args)
     local action=tostring(args[1] or "")
     if args._input_handler or INPUT_EVENTS.is_handler('input',args) then return INPUT_EVENTS.register(ctx,args) end
-    if action=='off' then
+    if action=='remove' or action=='clear' or action=='off' then
         local key=tostring(args[2] or '')
         if key=='all' and #args==2 then
             INPUT_EVENTS.off(ctx,'input')
@@ -9892,7 +9899,7 @@ ANIM_LIB["input"] = function(ctx,state,args)
         name=({pointer_move='move',mouse_move='move'})[name] or name
         local kind=args[3] and (INPUT_EVENTS.kinds[args[3]] or key=='focus' and ({gained='gained',lost='lost'})[args[3]])
         if not name or #args<2 or #args>3 or args[3] and not kind then
-            return false,'Input Error: Expected off | key | optional press, release, or hold; or off | all'
+            return false,'Input Error: Expected remove | key | optional press, release, or hold; or clear | all'
         end
         for _,binding in pairs(ctx.input_handlers or {}) do
             if binding.code.family=='input' and (binding.code.key==name or key=='focus' and binding.code.kind=='focus') and
@@ -10128,7 +10135,7 @@ ANIM_LIB["input"] = function(ctx,state,args)
 end
 
 -- Inclusive rectangle helper exposed to optional drawing modules.
-ANIM_LIB["projector"] = projector_command
+engine["projector"] = projector_command
 local function pixel_fill(frame, x0, y0, x1, y1, color)
     x0, y0 = math.max(0, math.floor(x0)), math.max(0, math.floor(y0))
     x1, y1 = math.min(frame.w - 1, math.floor(x1)), math.min(frame.h - 1, math.floor(y1))
@@ -10321,7 +10328,7 @@ function resolve_canvas_selection(ctx)
     return selections[0]
 end
 
-ANIM_LIB["canvas"] = function(ctx,state,args)
+engine["canvas"] = function(ctx,state,args)
     -- Compiled commands retain their raw argument table. Reuse its normalized
     -- syntax, while evaluating coordinates/text/colors normally on every draw.
     -- Weak keys release plans when their program is discarded; compare fields
@@ -10676,7 +10683,7 @@ end
 -- !array | unpack | name:coords | type:u16 | encoding:base64 | count:2 | data:"AQACAA=="
 -- u16 uses little-endian byte order. Hex is also accepted. This creates a
 -- normal 1-based engine table; later commands can copy or modify it.
-ANIM_LIB["array"] = function(ctx, state, args)
+engine["array"] = function(ctx, state, args)
     local fields, err = packed_fields(args, "unpack",
         {"name", "type", "encoding", "data", "count"})
     if not fields then return false, "Array Error: " .. err end
@@ -10707,10 +10714,10 @@ ANIM_LIB["array"] = function(ctx, state, args)
     if is_fatal(written) then return false, "Array Error: " .. written.msg end
     return true
 end
-ANIM_LIB["array.unpack"] = function(ctx, state, args)
+engine["array.unpack"] = function(ctx, state, args)
     local forwarded = {"unpack"}
     for i = 1, #args do forwarded[#forwarded + 1] = args[i] end
-    return ANIM_LIB["array"](ctx, state, forwarded)
+    return engine["array"](ctx, state, forwarded)
 end
 
 -- !sprite | create | name:hero | width:16 | height:16 |
@@ -10756,7 +10763,7 @@ local function packed_palette(raw)
     return palette
 end
 
-ANIM_LIB["sprite"] = function(ctx, state, args)
+engine["sprite"] = function(ctx, state, args)
     local action = tostring(args[1] or "")
     if action == "create" then
         local fields, err = packed_fields(args, action,
@@ -10807,7 +10814,7 @@ end
 
 -- A timed sequence of existing sprites, or packed frames sharing one palette.
 -- Time is supplied by the script so replay, pause, and seek are deterministic.
-ANIM_LIB["animation"] = function(ctx, state, args)
+engine["animation"] = function(ctx, state, args)
     if args._input_handler or INPUT_EVENTS and INPUT_EVENTS.is_handler('animation',args) then
         return INPUT_EVENTS.register(ctx,args,'animation')
     end
@@ -11138,7 +11145,7 @@ function ENGINE_UI.clipboard(ctx,action,text)
     local previous=ctx.active_scope;ctx.active_scope={}
     local args={action,'into:_ui_clipboard'}
     if action=='copy' then args[#args+1]='text:'..string.format('%q',text) end
-    local ok,why=ANIM_LIB.clipboard(ctx,{},args)
+    local ok,why=engine.clipboard(ctx,{},args)
     local result=ctx.active_scope._ui_clipboard;ctx.active_scope=previous
     return ok and result or {ok=0,error=tostring(why)}
 end
@@ -11562,7 +11569,7 @@ function ENGINE_UI.release_surface(surface)
     if source then obslua.obs_source_release(source) end
 end
 -- Widget commands are resolved against the running program, never registered
--- in ANIM_LIB. Removing a control cannot leave a global command or a stale
+-- in engine. Removing a control cannot leave a global command or a stale
 -- reference to its instance; existing built-ins and functions keep precedence.
 function ENGINE_UI.compile_member(name,args)
     local first=safe_trim(tostring(args[1] or ''))
@@ -11575,7 +11582,7 @@ function ENGINE_UI.compile_member(name,args)
         forwarded={'get',name}
         for _,value in ipairs(args) do forwarded[#forwarded+1]=value end
     elseif action=='on' or ENGINE_UI.events[action] or
-           ({set=true,get=true,value=true,hide=true,show=true,remove=true,focus=true,blur=true,paste=true,copy=true,off=true})[action] then
+           ({set=true,get=true,value=true,hide=true,show=true,remove=true,delete=true,clear=true,focus=true,blur=true,paste=true,copy=true,off=true})[action] then
         forwarded={action,name}
         for i=2,#args do forwarded[#forwarded+1]=args[i] end
     else
@@ -11600,7 +11607,7 @@ function ENGINE_UI.compile_member(name,args)
         return execute(ctx,state)
     end
 end
-ANIM_LIB.ui=function(ctx,state,args)
+engine.ui=function(ctx,state,args)
     local action=tostring(args[1] or ''):lower()
     if action=='frame' or action=='box' then action='panel' end
     local function fail(why) return false,'UI Error: '..tostring(why) end
@@ -11616,11 +11623,11 @@ ANIM_LIB.ui=function(ctx,state,args)
         if ctx.canvas_states and ctx.canvas_states[name] then return fail('Canvas '..name..' already exists; use a new UI name') end
         local selected,canvas_selected=ctx.canvas_state,ctx.canvas_selected and ctx.canvas_selected[ctx.context_id or 0]
         local capture={_capture_ui_item=true}
-        local ok,err=ANIM_LIB.renderer(ctx,capture, {'create','name:'..name,'kind:pixel',
+        local ok,err=engine.renderer(ctx,capture, {'create','name:'..name,'kind:pixel',
             'width:'..(screen.width or width),'height:'..(screen.height or height),'locked:true'})
         if not ok then return fail(err) end
         local canvas_ok
-        canvas_ok,ok,err=pcall(ANIM_LIB.canvas,ctx,{_ui_name=name,_ui_item=capture.ui_item}, {'create','name:'..name,'width:'..width,'height:'..height})
+        canvas_ok,ok,err=pcall(engine.canvas,ctx,{_ui_name=name,_ui_item=capture.ui_item}, {'create','name:'..name,'width:'..width,'height:'..height})
         if not canvas_ok then err=ok;ok=false end
         if not ok then
             ENGINE_UI.release_surface({scene_item=capture.ui_item,scene_source=capture.ui_scene_source})
@@ -11640,8 +11647,7 @@ ANIM_LIB.ui=function(ctx,state,args)
         return true
     end
     local ui=ctx.ui_state;if not ui then return fail('Create a UI first with !ui | create') end
-    if action=='clear' then
-        if #args~=1 then return fail('clear takes no arguments and removes this program\'s UI') end
+    if action=='clear' and #args==1 then
         ENGINE_UI.clear(ctx);return true
     elseif action=='update' or action=='blur' then
         if #args~=1 then return fail(action..' takes no arguments') end
@@ -11703,9 +11709,17 @@ ANIM_LIB.ui=function(ctx,state,args)
         ui.widgets[name]=w;ui.order[#ui.order+1]=w;w.surface.dirty=true;return true
     end
     local w=ui.widgets[name];if not w then return fail('No control named '..name) end
-    if action=='remove' or action=='show' or action=='hide' or action=='focus' then
+    if action=='off' or action=='clear' or action=='remove' and #args>2 then
+        if #args>3 then return fail(action..' takes a control name and optional event kind') end
+        local kind=args[3] and safe_trim(tostring(args[3])):lower()
+        if kind=='all' then kind=nil end
+        if kind and not ENGINE_UI.events[kind] then
+            return fail('Unknown event '..kind..'; use an event name or all')
+        end
+        INPUT_EVENTS.off(ctx,'ui',name,kind);return true
+    elseif action=='delete' or action=='remove' or action=='show' or action=='hide' or action=='focus' then
         if #args~=2 then return fail(action..' takes one control name') end
-        if action=='remove' then ENGINE_UI.remove(ctx,name)
+        if action=='delete' or action=='remove' then ENGINE_UI.remove(ctx,name)
         elseif action=='focus' then
             ENGINE_UI.layout(ctx)
             if not w.shown or not w.active or w.kind=='panel' or w.kind=='label' then return fail('Control cannot receive focus') end
@@ -11720,9 +11734,6 @@ ANIM_LIB.ui=function(ctx,state,args)
         ui.error=result.error or ''
         if result.ok==1 and action=='paste' then ENGINE_UI.edit(ctx,w,ENGINE_UI.normalize(w,result.text)) end
         return true
-    elseif action=='off' then
-        if #args>3 then return fail('off takes a control name and optional event kind') end
-        INPUT_EVENTS.off(ctx,'ui',name,args[3]);return true
     elseif action=='get' or action=='value' then
         local fields,why=ENGINE_UI.attributes(ctx,args,3,{into=true});if not fields then return fail(why) end
         if not fields.into then return fail(action..' needs -> | variable or into:variable') end
@@ -13225,7 +13236,7 @@ function TCP.clipboard(action,text)
     if opened then user.im3_clip_close() end
     return ok and result or {ok=0,text="",error="Clipboard access failed; focus OBS and try again"}
 end
-ANIM_LIB["clipboard"]=function(ctx,state,args)
+engine["clipboard"]=function(ctx,state,args)
     local action=tostring(args[1] or ""):lower();local fields={}
     if action~="copy" and action~="paste" then return false,"Clipboard Error: Expected copy or paste" end
     for i=2,#args do
@@ -13245,7 +13256,7 @@ ANIM_LIB["clipboard"]=function(ctx,state,args)
 end
 
 -- Named fields can appear in any order and can be grouped with commas.
-ANIM_LIB["network"] = function(ctx,state,args)
+engine["network"] = function(ctx,state,args)
     if args._input_handler or INPUT_EVENTS and INPUT_EVENTS.is_handler('network',args) then
         return INPUT_EVENTS.register(ctx,args,'network')
     end
@@ -13436,8 +13447,9 @@ ANIM_LIB["network"] = function(ctx,state,args)
             return true
         end
         local target=fields.peer and tostring(fields.peer) or "all"
-        if target~="all" then target=number("peer");assert(target and ep.peers[target],"peer was not found") end
+        if target~="all" then target=number("peer") end
         if action=="close" then
+            assert(target=="all" or ep.peers[target],"peer was not found")
             if target=="all" then TCP.close(ep) else TCP.drop(ep,ep.peers[target]) end
             return true
         end
@@ -13464,7 +13476,7 @@ ANIM_LIB["network"] = function(ctx,state,args)
         else
             for _,id in ipairs(ep.peer_order) do
                 local peer=ep.peers[id]
-                if (target=="all" or target==id) and peer.ready and not (peer.ws and peer.ws.closing) then
+                if peer and (target=="all" or target==id) and peer.ready and not (peer.ws and peer.ws.closing) then
                     if ep.buffer_limit>0 and peer.tx_bytes+#frame>ep.buffer_limit then why="Outgoing queue exceeds buffer_limit";break end
                     recipients[#recipients+1]=peer
                 end
@@ -13488,15 +13500,15 @@ end
 
 -- Dedicated WSS messaging; reuses OS socket/TLS ownership and tick scheduling.
 -- No connection to the OBS WebSocket plugin, OBS password, or control API.
-ANIM_LIB["connection"]=function(ctx,state,args)
+engine["connection"]=function(ctx,state,args)
     if args._input_handler or INPUT_EVENTS and INPUT_EVENTS.is_handler('connection',args) then
         return INPUT_EVENTS.register(ctx,args,'connection')
     end
     local forwarded={_transport="websocket"}
     for i,value in ipairs(args) do forwarded[i]=value end
-    return ANIM_LIB.network(ctx,state,forwarded)
+    return engine.network(ctx,state,forwarded)
 end
-ANIM_LIB["websocket"]=ANIM_LIB["connection"] -- Compatibility for existing scripts.
+engine["websocket"]=engine["connection"] -- Compatibility for existing scripts.
 
 function INPUT_EVENTS.condition(ctx,binding,value)
     local op=binding.code.op
@@ -14119,7 +14131,7 @@ function physics3d_arguments(args)
     end
     return fields
 end
-ANIM_LIB.physics=function(ctx,state,args)
+engine.physics=function(ctx,state,args)
     local fields,why=physics3d_arguments(args);if not fields then return false,why end
     local input=resolve_path(ctx,fields.state);if is_fatal(input) then return false,input.msg end
     local seconds=evaluate_math(ctx,fields.seconds);if is_fatal(seconds) then return false,seconds.msg end
@@ -15942,7 +15954,7 @@ end
 -- !worker | clear | program (all is a compatibility alias)
 -- Readable aliases: get_result, remove, stop_all.
 local worker_action_aliases={get_result="read",remove="release"}
-ANIM_LIB["worker"] = function(ctx, state, args)
+engine["worker"] = function(ctx, state, args)
     if args._input_handler or INPUT_EVENTS and INPUT_EVENTS.is_handler('worker',args) then
         return INPUT_EVENTS.register(ctx,args,'worker')
     end
@@ -16155,7 +16167,7 @@ end
 
 -- Read-only diagnostics. Lua memory belongs to this VM, not exclusively to one
 -- program; world counts include all worlds in this engine instance. No forced GC.
-ANIM_LIB["runtime"] = function(ctx, state, args)
+engine["runtime"] = function(ctx, state, args)
     if args[1]~="stats" or #args~=2 then
         return false,"Runtime Error: Expected stats | into:variable or -> | variable"
     end
@@ -16188,7 +16200,7 @@ end
 -- !module | load | path/to/game.lua
 -- A module returns a factory that receives reusable renderer and command hooks.
 local module_command_names = {}
-ANIM_LIB["module"] = function(ctx, state, args)
+engine["module"] = function(ctx, state, args)
     if tostring(args[1] or "") ~= "load" then
         return false, "Module Error: Expected load | path/to/module.lua"
     end
@@ -16207,7 +16219,7 @@ ANIM_LIB["module"] = function(ctx, state, args)
     if type(factory) ~= "function" then
         return false, "Module Error: File must return a function"
     end
-    ctx.module_commands = ctx.module_commands or {}
+    local pending,installing,failed={},true,false
     local api = {
         obslua = obslua, ffi = ffi, frames = raymaze_frames,
         pixel = raymaze_pixel, fill = pixel_fill,
@@ -16216,39 +16228,60 @@ ANIM_LIB["module"] = function(ctx, state, args)
         update_variable_state = update_variable_state,
         evaluate_math = evaluate_math, is_fatal = is_fatal,
     }
+    local function install_command(name,handler,raw)
+        ctx.module_commands=ctx.module_commands or {}
+        ctx.module_command_raw=ctx.module_command_raw or {}
+        ctx.module_commands[name]=handler
+        ctx.module_command_raw[name]=raw
+        if not module_command_names[name] then
+            module_command_names[name]=true
+            engine[name]=function(inner_ctx,inner_state,inner_args)
+                local callback=inner_ctx.module_commands and inner_ctx.module_commands[name]
+                if not callback then
+                    return false,"Module Error: Load the module that defines '"..name.."' first"
+                end
+                if not (inner_ctx.module_command_raw and inner_ctx.module_command_raw[name]) then
+                    local processed={}
+                    for index,value in ipairs(inner_args) do
+                        local result=preprocess_runtime_arg(inner_ctx,name,value)
+                        if is_fatal(result) then return false,result.msg end
+                        processed[index]=result
+                    end
+                    inner_args=processed
+                end
+                return callback(inner_ctx,inner_state,inner_args)
+            end
+        end
+        -- The dispatcher receives raw arguments; evaluation belongs to the
+        -- program's registration, never another program's global raw policy.
+        engine_raw=engine_raw or {};engine_raw[name]=true
+    end
     api.register_command = function(name, handler, raw)
+        if failed then error('Module Error: Installer has failed') end
         if type(name) ~= "string" or not name:match("^[%a_][%w_]*$") or
            type(handler) ~= "function" then
             error("Module Error: Invalid command registration")
         end
-        if ANIM_LIB[name] and not module_command_names[name] then
+        if engine[name] and not module_command_names[name] then
             error("Module Error: Command '" .. name .. "' belongs to the engine")
         end
-        ctx.module_commands[name] = handler
-        if not module_command_names[name] then
-            module_command_names[name] = true
-            ANIM_LIB[name] = function(inner_ctx, inner_state, inner_args)
-                local callback = inner_ctx.module_commands and inner_ctx.module_commands[name]
-                if not callback then
-                    return false, "Module Error: Load the module that defines '" .. name .. "' first"
-                end
-                return callback(inner_ctx, inner_state, inner_args)
-            end
-        end
-        ANIM_LIB_RAW = ANIM_LIB_RAW or {}
-        ANIM_LIB_RAW[name] = raw == true
+        if installing then pending[name]={handler=handler,raw=raw==true}
+        else install_command(name,handler,raw==true) end
     end
     local installed, install_error = pcall(factory, api)
     if not installed then
+        failed=true
         return false, "Module Error: " .. tostring(install_error)
     end
+    installing=false
+    for name,command in pairs(pending) do install_command(name,command.handler,command.raw) end
     ctx.loaded_modules[path] = true
     return true
 end
 
 -- !log | property_or_var_or_msg
 
-ANIM_LIB["log"] = function(src, state, args)
+engine["log"] = function(src, state, args)
     local msg = args[1]
     if msg == nil then
         return true
@@ -16323,7 +16356,7 @@ ANIM_LIB["log"] = function(src, state, args)
 end
 
 -- !rainbow | speed | duration
-ANIM_LIB["rainbow"] = function(src, state, args)
+engine["rainbow"] = function(src, state, args)
     if not src.scene_item then
         return true
     end
@@ -16377,7 +16410,7 @@ ANIM_LIB["rainbow"] = function(src, state, args)
 end
 
 -- !shake | intensity | duration
-ANIM_LIB["shake"] = function(src, state, args)
+engine["shake"] = function(src, state, args)
     if not src.scene_item then
         return true
     end
@@ -16413,7 +16446,7 @@ ANIM_LIB["shake"] = function(src, state, args)
 end
 
 -- !glitch | intensity | duration
-ANIM_LIB["glitch"] = function(src, state, args)
+engine["glitch"] = function(src, state, args)
     if not src.scene_item then
         return true
     end
@@ -16468,7 +16501,7 @@ ANIM_LIB["glitch"] = function(src, state, args)
 end
 
 -- !breathing | speed | duration
-ANIM_LIB["breathing"] = function(src, state, args)
+engine["breathing"] = function(src, state, args)
     if not src.scene_item then
         return true
     end
@@ -16503,7 +16536,7 @@ ANIM_LIB["breathing"] = function(src, state, args)
 end
 
 -- !dvd | speed | duration
-ANIM_LIB["dvd"] = function(src, state, args)
+engine["dvd"] = function(src, state, args)
     if not src.scene_item then
         return true
     end
@@ -16548,7 +16581,7 @@ ANIM_LIB["dvd"] = function(src, state, args)
 end
 
 -- !sway | speed | duration
-ANIM_LIB["sway"] = function(src, state, args)
+engine["sway"] = function(src, state, args)
     if not src.scene_item then
         return true
     end
@@ -16573,7 +16606,7 @@ ANIM_LIB["sway"] = function(src, state, args)
     return false
 end
 
-ANIM_LIB["spawn"] = function(src, state, args)
+engine["spawn"] = function(src, state, args)
     local target_label = clean_label_name(args[1])
     local label_target, label_queue, label_table = active_label_target(src, target_label)
     local save_var = nil
@@ -16638,7 +16671,7 @@ ANIM_LIB["spawn"] = function(src, state, args)
 
     return true
 end
-ANIM_LIB["run"] = function(src, state, args)
+engine["run"] = function(src, state, args)
     local target_label = clean_label_name(args[1])
     local label_target, label_queue, label_table = active_label_target(src, target_label)
     local interrupt_thread = nil
@@ -16698,12 +16731,12 @@ ANIM_LIB["run"] = function(src, state, args)
 end
 -- Both names start cooperative script tasks. The independent form starts with
 -- a new context and no selected source; neither form creates an OS thread.
-ANIM_LIB["start_task"] = ANIM_LIB["run"]
-ANIM_LIB["start_independent_task"] = ANIM_LIB["spawn"]
+engine["start_task"] = engine["run"]
+engine["start_independent_task"] = engine["spawn"]
 
 -- !await | thread_name |+|
 -- !await | (player_hp <= 0) |+|
-ANIM_LIB["await"] = function(src, state, args)
+engine["await"] = function(src, state, args)
     local target = args[1]
     if type(target) ~= "string" then
         target = tostring(target)
@@ -16752,7 +16785,7 @@ ANIM_LIB["await"] = function(src, state, args)
 end
 
 -- !stop | target_source OR label_name OR all
-ANIM_LIB["stop"] = function(src, state, args)
+engine["stop"] = function(src, state, args)
     local target = resolve_path(src, args[1])
     if target == nil or is_fatal(target) then
         target = args[1]
@@ -16816,7 +16849,7 @@ ANIM_LIB["stop"] = function(src, state, args)
     end
     return true
 end
-ANIM_LIB["then"] = function(src, state, args)
+engine["then"] = function(src, state, args)
     local cmd = args[1]
     local cmd_args = {};
     for i = 2, #args do
@@ -16828,10 +16861,10 @@ ANIM_LIB["then"] = function(src, state, args)
     end
     return true
 end
-ANIM_LIB["execute_command"] = ANIM_LIB["then"]
+engine["execute_command"] = engine["then"]
 
 -- !camera_shake | intensity | duration
-ANIM_LIB["camera_shake"] = function(src, state, args)
+engine["camera_shake"] = function(src, state, args)
     local intensity = tonumber(args[1]) or 10
     local duration = parse_time(args[2] or "200ms")
     if not state.init then
@@ -16867,7 +16900,7 @@ ANIM_LIB["camera_shake"] = function(src, state, args)
     return false
 end
 
-ANIM_LIB["path"] = function(src, state, args)
+engine["path"] = function(src, state, args)
     local targets = src.active_sources or {src.scene_item}
     if #targets == 0 then
         return true
@@ -16943,7 +16976,7 @@ end
 
 -- !pin | parent_source | offsets (x:50, y:10)
 -- To unpin, use !pin|none
-ANIM_LIB["pin"] = function(src, state, args)
+engine["pin"] = function(src, state, args)
     local targets = src.active_sources or {src.scene_item}
     if #targets == 0 then
         return true
@@ -16998,7 +17031,7 @@ ANIM_LIB["pin"] = function(src, state, args)
 end
 
 -- !spiral | center_x, center_y | start_radius | rotations | duration | easing
-ANIM_LIB["spiral"] = function(src, state, args)
+engine["spiral"] = function(src, state, args)
     local targets = src.active_sources or {src.scene_item}
     if #targets == 0 then
         return true
@@ -17035,7 +17068,7 @@ ANIM_LIB["spiral"] = function(src, state, args)
 end
 
 -- !fade | target_opacity | duration | easing
-ANIM_LIB["fade"] = function(src, state, args)
+engine["fade"] = function(src, state, args)
     local targets = src.active_sources or {src.scene_item}
     if #targets == 0 then
         return true
@@ -17070,7 +17103,7 @@ ANIM_LIB["fade"] = function(src, state, args)
 end
 -- !add_color | red | green | blue (adds an OBS color filter to selected sources)
 -- Legacy alias: !foreground.
-ANIM_LIB["foreground"] = function(src, state, args)
+engine["foreground"] = function(src, state, args)
     local r = tonumber(args[1]) or 0
     local g = tonumber(args[2]) or 0
     local b = tonumber(args[3]) or 0
@@ -17109,8 +17142,8 @@ ANIM_LIB["foreground"] = function(src, state, args)
     end
     return true
 end
-ANIM_LIB["add_color"] = ANIM_LIB["foreground"]
-ANIM_LIB["sound"] = function(src, state, args)
+engine["add_color"] = engine["foreground"]
+engine["sound"] = function(src, state, args)
     local target_name = resolve_path(src, args[1])
     if target_name == nil or is_fatal(target_name) then
         target_name = args[1]
@@ -17178,7 +17211,7 @@ ANIM_LIB["sound"] = function(src, state, args)
 end
 -- !spawn_repeatedly | target_source | max_count | interval_ms | callback-label |+|
 -- Legacy alias: !emitter.
-ANIM_LIB["emitter"] = function(ctx, state, args)
+engine["emitter"] = function(ctx, state, args)
     local target_name = resolve_path(ctx, args[1]) or args[1]
     local count = tonumber(resolve_path(ctx, args[2])) or 10
     local raw_interval = resolve_path(ctx, args[3]) or args[3]
@@ -17203,9 +17236,9 @@ ANIM_LIB["emitter"] = function(ctx, state, args)
     table.insert(ctx.async_tasks, emitter_task)
     return true
 end
-ANIM_LIB["spawn_repeatedly"] = ANIM_LIB["emitter"]
+engine["spawn_repeatedly"] = engine["emitter"]
 -- !despawn | duration_ms |+|
-ANIM_LIB["despawn"] = function(src, state, args)
+engine["despawn"] = function(src, state, args)
     local targets = src.active_sources or {src.scene_item}
     local raw_time = resolve_path(src, args[1]) or args[1]
     local duration = parse_time(raw_time) or 1000
@@ -17221,7 +17254,7 @@ ANIM_LIB["despawn"] = function(src, state, args)
     end
     return true
 end
-ANIM_LIB["remove_after"] = ANIM_LIB["despawn"]
+engine["remove_after"] = engine["despawn"]
 -- [[ PREDEFINED FUNCTIONNS ]]
 SCRIPT_FUNCS = {
     fps = function()
@@ -17250,6 +17283,7 @@ SCRIPT_FUNCS = {
         return {x = x, y = y}
     end,
     source = function(ctx, name)
+        ctx=ctx or src
         if not name then
             return nil
         end
@@ -17266,18 +17300,21 @@ SCRIPT_FUNCS = {
             return name
         elseif type(name) ~= "string" then
             return nil
-        elseif type(name) == "string" and src.templates and src.templates[name] then
-            return src.templates[name]
+        elseif type(name) == "string" and ctx.templates and ctx.templates[name] then
+            return ctx.templates[name]
         end
-        if not src.source_cache then
-            src.source_cache = {}
+        if not ctx.source_cache then
+            ctx.source_cache = {}
         end
-        if src.source_cache[name] then
-            if not obslua.obs_source_removed(src.source_cache[name].get_source()) then
-                return src.source_cache[name]
-            else
-                src.source_cache[name].free()
-                src.source_cache[name] = nil
+        local cached=ctx.source_cache[name]
+        if cached then
+            if cached.data and not obslua.obs_source_removed(cached.get_source()) then return cached end
+            -- Deleted wrappers have already released their native scene item.
+            -- Do not ask them for sources or retain stale unload records.
+            if cached.data then cached.free() end
+            ctx.source_cache[name]=nil
+            for i=#(obs._unload or {}),1,-1 do
+                if obs._unload[i]==cached then table.remove(obs._unload,i) end
             end
         end
         local asource = obs.front.source(name)
@@ -17285,7 +17322,7 @@ SCRIPT_FUNCS = {
             return nil
         end
         table.insert(obs._unload, asource)
-        src.source_cache[name] = asource
+        ctx.source_cache[name] = asource
         return asource
     end,
 
@@ -18798,12 +18835,15 @@ function run_code(src, settings)
     all_source_clones = {}
     obs.register:remove_all()
     if auto_cleanup then
-        for _, item in ipairs(auto_cleanup) do
+        for i=#auto_cleanup,1,-1 do
+            local item=auto_cleanup[i]
             if item and item.data then
-                item.remove()
-            end
+                local ok,removed=pcall(item.remove)
+                if not ok or removed==false then
+                    obslua.script_log(obslua.LOG_WARNING,'[4IM3-SCRIPT] Clone cleanup failed: '..tostring(removed))
+                else forget_clone(item) end
+            else forget_clone(item) end
         end
-        auto_cleanup = {}
     end
     local function strip_comments_preserve_strings(line)
         local out = {}
@@ -18873,6 +18913,7 @@ function run_code(src, settings)
     src.animation_states = nil
     src.loaded_modules = nil
     src.module_commands = nil
+    src.module_command_raw = nil
     src.queue = {}
     src.hotkeys = {}
     src.labels = {}
@@ -18890,6 +18931,8 @@ function run_code(src, settings)
     src.colliders = {}
     src.templates = {}
     src.label_hotkeys = {}
+    src.type_registry = {}
+    src.scope_type_registry = nil
 
     src.next_context_id = 1
     src.context_id = 0
@@ -19323,7 +19366,7 @@ function compile_block_text(src, raw_code, ctx_id)
                     -- Unknown command names may resolve to program-owned UI
                     -- controls at execution time. Preserve callback locations
                     -- without interpreting function arguments as UI syntax.
-                    if not ANIM_LIB[cmd] then parts._source_line=true_line;parts._source_command=clean_step end
+                    if not engine[cmd] then parts._source_line=true_line;parts._source_command=clean_step end
                     if not watch_vars_str and not material_guard then
                         local copied_parts = {}
                         for part_index, part in ipairs(parts) do
@@ -19402,7 +19445,7 @@ function compile_block_text(src, raw_code, ctx_id)
                                     not body:match("^%b{}$") then
                                     fn_error = "Function Error: Expected !fn | name | [parameters |] { ... } at line " ..
                                         tostring(true_line)
-                                elseif ANIM_LIB[name] or name == "fn" then
+                                elseif engine[name] or name == "fn" then
                                     fn_error = "Function Error: '" .. name .. "' is a built-in command"
                                 elseif src.functions and src.functions[name] then
                                     fn_error = "Function Error: Duplicate function '" .. name .. "'"
@@ -19660,8 +19703,8 @@ function script_tick(fps)
         src.world3d_removed_source = nil
         src.world3d_selected = nil
         if src.isInitialized and src.queue then
-            if ANIM_LIB and ANIM_LIB["stop"] then
-                ANIM_LIB["stop"](src, {}, {"all"})
+            if engine and engine["stop"] then
+                engine["stop"](src, {}, {"all"})
             else
                 src.current_idx = #src.queue + 1
                 src.async_tasks = {}
@@ -20278,7 +20321,14 @@ function script_tick(fps)
                     src.active_scope = target_write_scope
 
                     if popped.ret_var and ret_val ~= nil then
-                        update_variable_state(src, popped.ret_var, ret_val)
+                        local ok,written=pcall(update_variable_state,src,popped.ret_var,ret_val)
+                        if not ok or is_fatal(written) then
+                            generate_stack_trace(src,"Main Execution Loop",src.queue,src.labels,src.call_stack,
+                                src.current_idx,src.context_id,ok and written.msg or written)
+                            src.current_idx=#src.queue+1
+                            src.state={}
+                            break
+                        end
                     end
                 else
                     src.current_idx = popped or 1
