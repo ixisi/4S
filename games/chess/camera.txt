@@ -1,0 +1,58 @@
+-- White begins near the camera. The spotlight follows the camera.
+!var | cam_focus_x | 0 |+|
+!var | cam_focus_y | 0 |+|
+!var | cam_focus_z | -5 |+|
+!var | cam_yaw | 180 |+|
+!var | cam_pitch | -35 |+|
+!var | cam_radius | 7.8 |+|
+!var | cam_mode | 0 |+|
+!var | orbit_yaw | 180 |+|
+!var | orbit_pitch | -35 |+|
+!var | fp_yaw | 180 |+|
+!var | fp_pitch | -10 |+|
+!var | fp_x | 0 |+|
+!var | fp_y | 0.9 |+|
+!var | fp_z | -8 |+|
+!var | spot_on | 1 |+|
+!var | mouse_drag | 0 |+|
+!var | last_x | 0 |+|
+!var | last_y | 0 |+|
+!var | camera_dirty | 1 |+|
+!fn | chess_camera | {
+    !var | yaw_r | cam_yaw * pi / 180 |+|
+    !var | pitch_r | cam_pitch * pi / 180 |+|
+    !var | eye_x | cam_focus_x + cam_radius * math.sin(yaw_r) * math.cos(pitch_r) |+|
+    !var | eye_y | cam_focus_y - cam_radius * math.sin(pitch_r) |+|
+    !var | eye_z | cam_focus_z + cam_radius * math.cos(yaw_r) * math.cos(pitch_r) |+|
+    !var | camera_fov | 45 |+|
+    !if | cam_mode == 1 {
+        !var | eye_x | fp_x |+|
+        !var | eye_y | fp_y |+|
+        !var | eye_z | fp_z |+|
+        !var | camera_fov | 68 |+|
+    } |+|
+    !world3d | camera | x:eye_x,y:eye_y,z:eye_z |
+        yaw:cam_yaw,pitch:cam_pitch | fov:camera_fov | near:0.05,far:100 |+|
+    !world3d | spotlight | enabled:spot_on | x:eye_x,y:eye_y,z:eye_z |
+        yaw:cam_yaw,pitch:cam_pitch | angle:68,range:30 |
+        intensity:2,ambient:0.33 | red:255,green:238,blue:210 |+|
+} |+|
+!fn | chess_reset_camera | {
+    !if | cam_mode == 1 {
+        !var | fp_x | 0 |+|
+        !var | fp_y | 0.9 |+|
+        !var | fp_z | -8 |+|
+        !var | cam_yaw | 180 |+|
+        !var | cam_pitch | -10 |+|
+    } |+|
+    !else {
+        !var | cam_focus_x | 0 |+|
+        !var | cam_focus_y | 0 |+|
+        !var | cam_focus_z | -5 |+|
+        !var | cam_yaw | 180 |+|
+        !var | cam_pitch | -35 |+|
+        !var | cam_radius | 7.8 |+|
+    } |+|
+    !var | camera_dirty | 1 |+|
+    !chess_camera |+|
+} |+|
