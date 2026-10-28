@@ -1,0 +1,211 @@
+-- One OBS tick per input sample. Pick returns the frontmost 3D part or board.
+!label | chess_frame |+|
+!wait | frame |+|
+!chess_net_poll |+|
+!input | snapshot | keys | ENTER | ESCAPE | M | N | C | R | F | G | L | P | TAB | SPACE |
+    W | A | S | D | Q | E | V | UP | DOWN | LEFT | RIGHT | SHIFT | CTRL |
+    MOUSE_LEFT | MOUSE_RIGHT | MOUSE_MIDDLE |+|
+!input | wheel | wheel_steps |+|
+!if | keys.mouse_inside == 1 and keys.MOUSE_LEFT_pressed == 1 {
+    !input | preview | focus |+|
+} |+|
+
+!if | keys.F_pressed == 1 { !projector | fullscreen | monitor:0 |+| } |+|
+-- A separate online waiting state cannot fall through to menu or piece input.
+!if | net_waiting == 1 and net_active == 1 and net_ready == 0 {
+    !chess_wait_input |+|
+    !chess_menu_orbit |+|
+    !jump | chess_frame |+|
+} |+|
+!if | join_visible == 1 {
+    !chess_join_input |+|
+    !chess_menu_orbit |+|
+    !jump | chess_frame |+|
+} |+|
+!var | pause_just_opened | 0 |+|
+!if | started == 1 and game_over == 0 and paused == 0 and keys.TAB_pressed == 1 {
+    !chess_menu_pause |+|
+    !var | pause_just_opened | 1 |+|
+} |+|
+!if | started == 0 or game_over == 1 or paused == 1 {
+    !if | menu_visible == 0 { !chess_menu_show |+| } |+|
+    !if | paused == 0 and keys.M_pressed == 1 {
+        !chess_net_close |+|
+        !var | mode | (mode == 1 and 0 or 1) |+|
+        !var | menu_choice | (mode == 1 and 1 or 2) |+|
+        !chess_menu_draw |+|
+    } |+|
+    !if | keys.UP_pressed == 1 or keys.LEFT_pressed == 1 { !chess_menu_step | -1 |+| } |+|
+    !if | keys.DOWN_pressed == 1 or keys.RIGHT_pressed == 1 { !chess_menu_step | 1 |+| } |+|
+    !if | paused == 1 and keys.TAB_pressed == 1 and pause_just_opened == 0 {
+        !chess_menu_resume |+|
+    } |+|
+    !chess_menu_pointer |+|
+    !if | keys.ENTER_pressed == 1 and menu_visible == 1 {
+        !chess_menu_activate |+|
+    } |+|
+    !if | menu_visible == 1 { !chess_menu_orbit |+| } |+|
+    !jump | chess_frame |+|
+} |+|
+!if | keys.C_pressed == 1 { !chess_reset_camera |+| } |+|
+!if | keys.P_pressed == 1 {
+    !if | cam_mode == 0 {
+        !var | orbit_yaw | cam_yaw |+|
+        !var | orbit_pitch | cam_pitch |+|
+        !var | cam_yaw | fp_yaw |+|
+        !var | cam_pitch | fp_pitch |+|
+        !var | cam_mode | 1 |+|
+    } |+|
+    !else {
+        !var | fp_yaw | cam_yaw |+|
+        !var | fp_pitch | cam_pitch |+|
+        !var | cam_yaw | orbit_yaw |+|
+        !var | cam_pitch | orbit_pitch |+|
+        !var | cam_mode | 0 |+|
+    } |+|
+    !var | mouse_drag | 0 |+|
+    !var | camera_dirty | 1 |+|
+    !chess_hud |+|
+} |+|
+!if | keys.SPACE_pressed == 1 {
+    !var | cam_yaw | cam_yaw + 180 |+|
+    !var | camera_dirty | 1 |+|
+} |+|
+!if | keys.L_pressed == 1 {
+    !var | spot_on | 1 - spot_on |+|
+    !var | camera_dirty | 1 |+|
+} |+|
+!if | keys.G_pressed == 1 and selected_piece > 0 {
+    !if | cam_mode == 0 {
+        !var | cam_focus_x | (4.5 - piece_file[selected_piece]) * 0.5 |+|
+        !var | cam_focus_y | 0 |+|
+        !var | cam_focus_z | -7.25 + piece_rank[selected_piece] * 0.5 |+|
+        !var | cam_radius | 2.5 |+|
+    } |+|
+    !else {
+        !var | fp_x | (4.5 - piece_file[selected_piece]) * 0.5 |+|
+        !var | fp_z | -7.75 + piece_rank[selected_piece] * 0.5 |+|
+        !var | fp_y | 0.9 |+|
+        !var | cam_pitch | -25 |+|
+    } |+|
+    !var | camera_dirty | 1 |+|
+} |+|
+
+!var | camera_step | math.max(0.005,math.min(0.08,tick)) |+|
+!var | pan_speed | camera_step * cam_radius * 0.65 |+|
+!var | walk_speed | camera_step * 2.5 |+|
+!var | turn_speed | camera_step * 60 |+|
+!if | keys.SHIFT == 1 {
+    !var | pan_speed | pan_speed * 2 |+|
+    !var | walk_speed | walk_speed * 2 |+|
+    !var | turn_speed | turn_speed * 2 |+|
+} |+|
+!if | keys.LEFT == 1 { !var | cam_yaw | cam_yaw - turn_speed |+| !var | camera_dirty | 1 |+| } |+|
+!if | keys.RIGHT == 1 { !var | cam_yaw | cam_yaw + turn_speed |+| !var | camera_dirty | 1 |+| } |+|
+!if | keys.UP == 1 { !var | cam_pitch | cam_pitch + turn_speed |+| !var | camera_dirty | 1 |+| } |+|
+!if | keys.DOWN == 1 { !var | cam_pitch | cam_pitch - turn_speed |+| !var | camera_dirty | 1 |+| } |+|
+!if | keys.Q == 1 {
+    !if | cam_mode == 0 { !var | cam_focus_y | cam_focus_y - pan_speed |+| } |+|
+    !else { !var | fp_y | fp_y - walk_speed |+| } |+|
+    !var | camera_dirty | 1 |+|
+} |+|
+!if | keys.E == 1 {
+    !if | cam_mode == 0 { !var | cam_focus_y | cam_focus_y + pan_speed |+| } |+|
+    !else { !var | fp_y | fp_y + walk_speed |+| } |+|
+    !var | camera_dirty | 1 |+|
+} |+|
+!var | walk_right | keys.D - keys.A |+|
+!var | walk_forward | keys.W - keys.S |+|
+!if | walk_right != 0 or walk_forward != 0 {
+    !var | heading | cam_yaw * pi / 180 |+|
+    !var | move_x | walk_right * math.cos(heading) - walk_forward * math.sin(heading) |+|
+    !var | move_z | -walk_right * math.sin(heading) - walk_forward * math.cos(heading) |+|
+    !if | cam_mode == 0 {
+        !var | cam_focus_x | cam_focus_x + pan_speed * move_x |+|
+        !var | cam_focus_z | cam_focus_z + pan_speed * move_z |+|
+    } |+|
+    !else {
+        !var | fp_x | fp_x + walk_speed * move_x |+|
+        !var | fp_z | fp_z + walk_speed * move_z |+|
+    } |+|
+    !var | camera_dirty | 1 |+|
+} |+|
+!if | cam_mode == 0 and keys.mouse_inside == 1 and wheel_steps != 0 {
+    !var | cam_radius | math.max(0.4,math.min(45,cam_radius * math.pow(0.85,wheel_steps))) |+|
+    !var | camera_dirty | 1 |+|
+} |+|
+!if | keys.mouse_inside == 1 and
+    (keys.MOUSE_RIGHT_pressed == 1 or keys.MOUSE_MIDDLE_pressed == 1) {
+    !var | last_x | keys.x |+|
+    !var | last_y | keys.y |+|
+    !var | mouse_drag | 1 |+|
+} |+|
+!if | mouse_drag == 1 and keys.mouse_inside == 1 {
+    !var | drag_dx | keys.x - last_x |+|
+    !var | drag_dy | keys.y - last_y |+|
+    !if | keys.MOUSE_RIGHT == 1 and (drag_dx != 0 or drag_dy != 0) {
+        !var | cam_yaw | cam_yaw + drag_dx * 0.28 |+|
+        !var | cam_pitch | cam_pitch - drag_dy * 0.28 |+|
+        !var | camera_dirty | 1 |+|
+    } |+|
+    !if | cam_mode == 0 and keys.MOUSE_MIDDLE == 1 and (drag_dx != 0 or drag_dy != 0) {
+        !var | pan_factor | cam_radius * 0.0015 |+|
+        !var | heading | cam_yaw * pi / 180 |+|
+        !var | cam_focus_x | cam_focus_x - drag_dx * pan_factor * math.cos(heading) |+|
+        !var | cam_focus_z | cam_focus_z + drag_dx * pan_factor * math.sin(heading) |+|
+        !var | cam_focus_y | cam_focus_y + drag_dy * pan_factor |+|
+        !var | camera_dirty | 1 |+|
+    } |+|
+    !var | last_x | keys.x |+|
+    !var | last_y | keys.y |+|
+} |+|
+!if | keys.MOUSE_RIGHT == 0 and keys.MOUSE_MIDDLE == 0 { !var | mouse_drag | 0 |+| } |+|
+!var | cam_pitch | math.max(-85,math.min(85,cam_pitch)) |+|
+!var | fp_y | math.max(0.25,math.min(8,fp_y)) |+|
+!if | camera_dirty == 1 { !chess_camera |+| !var | camera_dirty | 0 |+| } |+|
+
+!if | keys.mouse_inside == 1 and keys.y >= hud_height and keys.MOUSE_LEFT_pressed == 1 and
+    started == 1 and game_over == 0 and
+    (mode == 0 or (mode == 1 and turn == 1) or
+    (mode == 2 and net_ready == 1 and net_pending == 0 and turn == net_side)) {
+    !world3d | pick | x:keys.x,y:keys.y | into:hit |+|
+    !if | hit.found == 1 {
+        !var | clicked_node | tonumber(string.match(hit.name,"^ChessMatch_(%d+)$")) or 0 |+|
+        !var | clicked_piece | (clicked_node > 0 and node_piece[clicked_node] or 0) |+|
+        !var | promoted_piece | tonumber(string.match(hit.name,"^ChessPromoted_(%d+)$")) or 0 |+|
+        !if | promoted_piece > 0 { !var | clicked_piece | promoted_piece |+| } |+|
+        !var | target_file | math.floor((2 - hit.x) / 0.5) + 1 |+|
+        !var | target_rank | math.floor((hit.z + 7) / 0.5) + 1 |+|
+        !if | clicked_piece > 0 and piece_alive[clicked_piece] == 1 and
+            side[clicked_piece] == turn {
+            !var | selected_piece | clicked_piece |+|
+            !var | status | piece_label[clicked_piece] .. " SELECTED" |+|
+            !chess_selection |+|
+            !chess_request_moves |+|
+            !chess_net_select | clicked_piece |+|
+            !chess_hud |+|
+        } |+|
+        !else {
+            !if | selected_piece > 0 {
+                !chess_validate | selected_piece | target_file | target_rank |+|
+                !if | legal == 1 {
+                    !if | mode == 2 {
+                        !chess_net_submit | selected_piece | target_file | target_rank |+|
+                    } |+|
+                    !else { !chess_commit | selected_piece | target_file | target_rank |+| } |+|
+                } |+|
+                !else {
+                    !var | status | "ILLEGAL MOVE" |+|
+                    !chess_hud |+|
+                } |+|
+            } |+|
+        } |+|
+    } |+|
+} |+|
+
+!chess_poll_moves |+|
+
+!if | ai_pending == 1 and mode == 1 and turn == -1 and game_over == 0 {
+    !chess_computer_move |+|
+} |+|
+!jump | chess_frame |+|
