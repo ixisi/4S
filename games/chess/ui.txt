@@ -1,0 +1,36 @@
+-- Shared UI drawing helpers; all coordinates are scene pixels.
+!fn | chess_ui_panel | x,y,width,height,red,green,blue,radius:8 | {
+    !canvas | rectangle | x:x+radius,y:y,width:width-2*radius,height:height |
+        red:red,green:green,blue:blue |+|
+    !canvas | rectangle | x:x,y:y+radius,width:width,height:height-2*radius |
+        red:red,green:green,blue:blue |+|
+    !canvas | circle | x:x+radius,y:y+radius,radius:radius |
+        red:red,green:green,blue:blue |+|
+    !canvas | circle | x:x+width-radius-1,y:y+radius,radius:radius |
+        red:red,green:green,blue:blue |+|
+    !canvas | circle | x:x+radius,y:y+height-radius-1,radius:radius |
+        red:red,green:green,blue:blue |+|
+    !canvas | circle | x:x+width-radius-1,y:y+height-radius-1,radius:radius |
+        red:red,green:green,blue:blue |+|
+} |+|
+
+!fn | chess_ui_text | caption,x,y,scale:2,red:225,green:233,blue:244 | {
+    !canvas | text | font:readable | text:caption | x:x,y:y,scale:scale |
+        red:red,green:green,blue:blue |+|
+} |+|
+
+!fn | chess_ui_button | item,caption,detail,active:0 | {
+    !chess_ui_panel | item.x | item.y | item.width | item.height |
+        (active == 1 and 232 or 47) | (active == 1 and 192 or 63) |
+        (active == 1 and 112 or 84) |+|
+    !chess_ui_panel | item.x+2 | item.y+2 | item.width-4 | item.height-4 |
+        (active == 1 and 35 or 23) | (active == 1 and 48 or 34) |
+        (active == 1 and 64 or 49) | 6 |+|
+    !chess_ui_text | caption | item.x+16 | item.y+14 |
+        (item.height >= 70 and menu_font_scale or 2) |
+        (active == 1 and 255 or 225) | (active == 1 and 220 or 233) |
+        (active == 1 and 155 or 244) |+|
+    !if | detail != "" {
+        !chess_ui_text | detail | item.x+16 | item.y+46 | 2 | 146 | 171 | 195 |+|
+    } |+|
+} |+|
