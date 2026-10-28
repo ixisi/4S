@@ -214,8 +214,10 @@ local function host_library_path(name)
             local image = ffi.C._dyld_get_image_name(i)
             if image ~= nil then
                 local path = ffi.string(image)
-                if path:match("/lib?" .. pattern_name .. "%.framework/") or
-                   path:match("/lib?" .. pattern_name .. "[%d%.]*%.dylib$") then
+                if path:match('/'..pattern_name..'%.framework/') or
+                   path:match('/lib'..pattern_name..'%.framework/') or
+                   path:match('/'..pattern_name..'[%d%.]*%.dylib$') or
+                   path:match('/lib'..pattern_name..'[%d%.]*%.dylib$') then
                     return path
                 end
             end
@@ -1219,6 +1221,11 @@ end
 local raw_runtime_arg_commands
 local evaluated_builtin_arg_commands
 
+function valid_result_destination(value)
+    return type(value)=='string' and (value:match('^[A-Za-z_][%w_]*$')~=nil or
+        is_complete_value_path and is_complete_value_path(value)) or false
+end
+
 local function prepare_function_call(src, name, raw_args)
     local definition = src.functions[name]
     local parameters = definition.params or {}
@@ -1233,7 +1240,7 @@ local function prepare_function_call(src, name, raw_args)
                 return false, "Function Error: Expected one return variable after '->'"
             end
             ret_var = safe_trim(raw_args[index + 1])
-            if not ret_var:match("^[A-Za-z_][%w_]*$") then
+            if not valid_result_destination(ret_var) then
                 return false, "Function Error: Invalid return variable '" .. ret_var .. "'"
             end
             break
@@ -1314,8 +1321,8 @@ function compile_line(cmd, args)
             result_error="Expected -> | variable at the end of the command"
         else
             result_target=safe_trim(tostring(args[arrow_index+1]))
-            if not result_target:match("^[A-Za-z_][%w_]*$") then
-                result_error="Result destination must be a variable name"
+            if not valid_result_destination(result_target) then
+                result_error="Result destination must be a variable name or table path"
             end
         end
         -- Calls and independent tasks already own their result lifetimes.
@@ -1331,7 +1338,7 @@ function compile_line(cmd, args)
                 if cmd=="connection" or cmd=="websocket" or cmd=="network" then
                     if ({addresses=true,invite=true,decode=true,send=true,receive=true,status=true})[action] then field="into" end
                 elseif cmd=="clipboard" and (action=="copy" or action=="paste") then field="into"
-                elseif cmd=="runtime" and action=="stats" then field="into"
+                elseif cmd=="runtime" and (action=="stats" or action=="timings") then field="into"
                 elseif cmd=="ui" and (action=="get" or action=="value" or action=="state") then field="into"
                 elseif cmd=="physics" and action=="step" then field="into"
                 elseif cmd=="world3d" then
@@ -1358,7 +1365,7 @@ function compile_line(cmd, args)
                 elseif cmd=="input" then
                     if action=="snapshot" or action=="keys" then
                         table.insert(args,2,result_target)
-                    elseif action=="text" or action=="wheel" or action=="focus" or action=="recenter" then
+                    elseif action=="text" or action=="wheel" or action=="focus" or action=="recenter" or action=="status" then
                         if #args~=1 then result_error="Omit the positional output variable when using ->"
                         else args[2]=result_target end
                     elseif action=="key" or action=="mouse" then
@@ -1380,6 +1387,8 @@ function compile_line(cmd, args)
                         else args[3]=result_target end
                     elseif ({start=true,cancel=true,release=true,remove=true,clear=true,stop_all=true})[action] then
                         result_error="This worker action does not return data"
+                    elseif not result_target:match('^[A-Za-z_][%w_]*$') then
+                        result_error="Worker job destinations need a simple name; worker | read | job | -> | table.path can copy its status"
                     elseif #args~=1 then result_error="Omit the positional output variable when using ->"
                     else args[2]=result_target end
                 elseif cmd=="load" then
@@ -1536,6 +1545,29 @@ function compile_line(cmd, args)
         end
     end
 
+    -- Suggestions are error-only work. They never redirect a valid function,
+    -- widget, module, or selected source method to a different command.
+    local function command_hint(src)
+        if #cmd>64 then return '' end
+        local wanted=cmd:lower();local best,score=nil,#wanted<=4 and 1 or 2
+        local function consider(name)
+            if type(name)~='string' or name:sub(1,2)=='__' or math.abs(#name-#wanted)>score then return end
+            local other=name:lower();local prior={};for j=0,#other do prior[j]=j end
+            for i=1,#wanted do
+                local row={[0]=i}
+                for j=1,#other do
+                    row[j]=math.min(row[j-1]+1,prior[j]+1,prior[j-1]+(wanted:sub(i,i)==other:sub(j,j) and 0 or 1))
+                end
+                prior=row
+            end
+            local distance=prior[#other]
+            if distance<=score and (distance<score or not best or name<best) then best,score=name,distance end
+        end
+        for name in pairs(engine) do consider(name) end
+        for name in pairs(src.functions or {}) do consider(name) end
+        for name in pairs(src.ui_state and src.ui_state.widgets or {}) do consider(name) end
+        return best and ('; did you mean !'..best..'?') or ''
+    end
     -- fallback object method invocation
     local widget_command
     return function(src, override_state)
@@ -1555,7 +1587,7 @@ function compile_line(cmd, args)
         end
         local items = src.active_sources or {src.scene_item}
         if #items == 0 then
-            return false, "Unknown command or no selected source method: !" .. tostring(cmd)
+            return false, "Unknown command or no selected source method: !" .. tostring(cmd)..command_hint(src)
         end
         if result_target and (#items~=1 or #args~=0) then
             return false,"Result Error: Source getters with -> require one selected source and no value arguments"
@@ -1580,7 +1612,7 @@ function compile_line(cmd, args)
                 end
 
                 if not func_found or type(func) ~= "function" then
-                    return false, "Unknown object method: !" .. tostring(cmd)
+                    return false, "Unknown object method: !" .. tostring(cmd)..command_hint(src)
                 end
 
                 local final_args = {}
@@ -1955,11 +1987,11 @@ engine["wait"] = function(src, state, args)
         end
     end
     if not state.init then
-        state.start_time = os.clock()
+        state.start_ms = engine_tick_now_ms()
         state.init = true
     end
 
-    if (os.clock() - state.start_time) * 1000 >= duration then
+    if engine_tick_now_ms() - state.start_ms >= duration then
         return true
     else
         return false
@@ -8626,6 +8658,127 @@ local function raymaze_mouse_window()
     return handle
 end
 
+-- Quartz state is polled on the script thread. AppKit/Qt are read only by an
+-- isolated Lua state queued on OBS's UI thread (initialized below).
+local mac_input={}
+function mac_input.open()
+    if mac_input.checked then return mac_input.backend,mac_input.error end
+    mac_input.checked=true
+    local ok,result=pcall(function()
+        ffi.cdef[[
+            typedef struct { uint32_t high, low; } im3_mac_psn;
+            typedef struct { double x,y; } im3_mac_point;
+            typedef struct { double w,h; } im3_mac_size;
+            typedef struct { im3_mac_point origin; im3_mac_size size; } im3_mac_rect;
+            typedef struct {
+                int32_t refs, pending, sequence, failed;
+                double values[14]; char title[512]; char error[256];
+            } im3_mac_input_shared;
+            int16_t GetFrontProcess(im3_mac_psn *);
+            int16_t GetProcessPID(const im3_mac_psn *, int32_t *);
+            int getpid(void);
+            bool CGPreflightListenEventAccess(void);
+            bool CGEventSourceKeyState(int32_t, uint16_t);
+            bool CGEventSourceButtonState(int32_t, uint32_t);
+            const void *CGEventCreate(const void *);
+            im3_mac_point CGEventGetLocation(const void *);
+            void CFRelease(const void *);
+            int32_t CGWarpMouseCursorPosition(im3_mac_point);
+            int32_t OSAtomicIncrement32Barrier(volatile int32_t *);
+            int32_t OSAtomicDecrement32Barrier(volatile int32_t *);
+            int32_t OSAtomicAdd32Barrier(int32_t, volatile int32_t *);
+            bool OSAtomicCompareAndSwap32Barrier(int32_t,int32_t,volatile int32_t *);
+            void *calloc(size_t,size_t);
+            void free(void *);
+            void *dlsym(void *,const char *);
+            void dispatch_async_f(void *,void *,im3_obs_task_t);
+        ]]
+        local b={cg=ffi.load('/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices'),
+            carbon=ffi.load('/System/Library/Frameworks/Carbon.framework/Carbon'),
+            system=ffi.load('/usr/lib/libSystem.B.dylib'),next_permission=0}
+        b.pid=tonumber(b.system.getpid())
+        b.queue=b.system.dlsym(ffi.cast('void*',-2),'_dispatch_main_q')
+        assert(b.queue~=nil and b.queue~=ffi.NULL and b.system.dispatch_async_f,'macOS main queue is unavailable')
+        assert(b.cg.CGEventSourceKeyState and b.cg.CGEventSourceButtonState and
+            b.carbon.GetFrontProcess and b.carbon.GetProcessPID)
+        local found,preflight=pcall(function() return b.cg.CGPreflightListenEventAccess end)
+        b.preflight=found and preflight or nil -- Pre-10.15 systems do not expose this check.
+        local bridge,why=mac_input.ui_open(b)
+        assert(bridge,why)
+        b.bridge=bridge
+        return b
+    end)
+    if ok then mac_input.backend=result else mac_input.error='macOS input unavailable: '..tostring(result) end
+    return mac_input.backend,mac_input.error
+end
+function mac_input.permission(b)
+    local now=engine_tick_now_ms()
+    if b.allowed==nil or now>=b.next_permission then
+        b.next_permission=now+1000
+        b.allowed=not b.preflight or b.preflight()
+    end
+    return b.allowed
+end
+function mac_input.frontmost(b)
+    local process,pid=ffi.new('im3_mac_psn[1]'),ffi.new('int32_t[1]')
+    return b.carbon.GetFrontProcess(process)==0 and
+        b.carbon.GetProcessPID(process,pid)==0 and tonumber(pid[0])==b.pid
+end
+function mac_input.warn(message)
+    if message and mac_input.last_warning~=message then
+        mac_input.last_warning=message
+        obslua.script_log(obslua.LOG_WARNING,'[4IM3-SCRIPT] '..message)
+    end
+end
+function mac_input.sample(b,ctx)
+    b.context=ctx;b.mapping=nil
+    mac_input.ui_sample(b)
+    b.focus_is_obs=mac_input.focused(b)
+    if not mac_input.permission(b) then
+        mac_input.warn('macOS input: enable OBS in System Settings > Privacy & Security > Input Monitoring, then restart OBS if requested')
+    end
+end
+function mac_input.focused(b)
+    if not mac_input.frontmost(b) or not mac_input.permission(b) then return false end
+    local s=b.snapshot
+    if not s or engine_tick_now_ms()-(b.observed_ms or 0)>250 or s[1]~=1 then return false end
+    local viewport=b.context and b.context.input_viewport
+    return s[2]==1 or s[2]==2 or
+        viewport and s[2]==3 and s[14]==1 and b.title:find(viewport.name,1,true)~=nil or false
+end
+mac_input.codes={
+    A=0,S=1,D=2,F=3,H=4,G=5,Z=6,X=7,C=8,V=9,B=11,Q=12,W=13,E=14,R=15,
+    Y=16,T=17,['1']=18,['2']=19,['3']=20,['4']=21,['6']=22,['5']=23,
+    ['=']=24,['9']=25,['7']=26,['-']=27,['8']=28,['0']=29,[']']=30,O=31,U=32,
+    ['[']=33,I=34,P=35,ENTER={36,76},L=37,J=38,["'"]=39,K=40,[';']=41,
+    ['\\']=42,[',']=43,['/']=44,N=45,M=46,['.']=47,TAB=48,SPACE=49,['`']=50,
+    BACKSPACE=51,ESCAPE=53,META={55,54},SHIFT={56,60},ALT={58,61},CTRL={59,62},
+    NUMPAD_DECIMAL=65,NUMPAD_MULTIPLY=67,NUMPAD_ADD=69,NUMPAD_DIVIDE=75,
+    NUMPAD_SUBTRACT=78,NUMPAD0=82,NUMPAD1=83,NUMPAD2=84,NUMPAD3=85,NUMPAD4=86,
+    NUMPAD5=87,NUMPAD6=88,NUMPAD7=89,NUMPAD8=91,NUMPAD9=92,NUMPAD_SEPARATOR=95,
+    F5=96,F6=97,F7=98,F3=99,F8=100,F9=101,F11=103,F10=109,F12=111,
+    HOME=115,DELETE=117,F4=118,END=119,F2=120,F1=122,LEFT=123,RIGHT=124,DOWN=125,UP=126,
+}
+mac_input.buttons={MOUSE_LEFT=0,MOUSE_RIGHT=1,MOUSE_MIDDLE=2,MOUSE_X1=3,MOUSE_X2=4}
+function mac_input.key(b,name)
+    if not b.focus_is_obs then return false end
+    local mouse=mac_input.buttons[name]
+    if mouse~=nil then return b.cg.CGEventSourceButtonState(0,mouse) end
+    local code=mac_input.codes[name]
+    if type(code)=='table' then
+        for _,value in ipairs(code) do if b.cg.CGEventSourceKeyState(0,value) then return true end end
+        return false
+    end
+    return code~=nil and b.cg.CGEventSourceKeyState(0,code) or false
+end
+function mac_input.pointer(b)
+    local event=b.cg.CGEventCreate(nil)
+    if event==nil or event==ffi.NULL then return nil end
+    local point=b.cg.CGEventGetLocation(event)
+    b.cg.CFRelease(event)
+    return tonumber(point.x),tonumber(point.y)
+end
+
 -- OBS's Lua source registration does not forward source interaction callbacks.
 -- On X11, read the existing display's keyboard state while an OBS window owns
 -- focus. No helper process or project-specific native library is required.
@@ -8867,6 +9020,7 @@ function input_host.wheel_delta(handle)
     return tonumber(state[0]) / 120
 end
 function input_host.focused(handle)
+    if host_os=='OSX' and handle==mac_input.backend then return handle.focus_is_obs==true end
     if handle == x11_keyboard and x11_keyboard then
         return linux_x11_focused(x11_keyboard)
     end
@@ -8876,6 +9030,7 @@ function input_host.focused(handle)
     return host_os == "Windows" and ffi.C.GetForegroundWindow() == handle
 end
 function input_host.screen_pointer()
+    if host_os=='OSX' and mac_input.backend then return mac_input.pointer(mac_input.backend) end
     if host_os ~= "Windows" then return nil end
     local point = ffi.new("POINT")
     if ffi.C.GetCursorPos(point) == 0 then return nil end
@@ -8892,6 +9047,13 @@ function input_host.client_position(handle, x, y)
     if type(handle) == "table" and handle.input_interaction then
         if x and y and x >= 0 and y >= 0 and
            x < handle.width and y < handle.height then return x, y end
+        return nil
+    end
+    if host_os=='OSX' and handle==mac_input.backend then
+        -- No window-relative guess: the mapping comes from its actual view.
+        local ctx=handle.context or {}
+        local viewport=ctx.input_preview or ctx.input_viewport
+        if viewport then return mac_input.map(handle,viewport.width,viewport.height,ctx.input_viewport) end
         return nil
     end
     if host_os ~= "Windows" then return nil end
@@ -8932,6 +9094,61 @@ local function input_viewport_coordinates(px,py,area_width,area_height,
     local y=(py-top)/scale
     if x<0 or y<0 or x>=source_width or y>=source_height then return nil end
     return x,y
+end
+if host_os=='OSX' then
+function mac_input.map(b,width,height,viewport)
+    if not b or not mac_input.focused(b) then return nil end
+    local s=b.snapshot
+    if viewport and (s[2]~=3 or not b.title:find(viewport.name,1,true)) then return nil,nil,true,b end
+    if not viewport and s[2]~=1 and s[2]~=2 then return nil,nil,true,b end
+    if s[14]~=1 then
+        if b.geometry_error and b.geometry_error~='' then mac_input.warn('macOS preview mapping: '..b.geometry_error) end
+        return nil,nil,true,b
+    end
+    local px,py=mac_input.pointer(b)
+    if not px then return nil,nil,true,b end
+    local ratio=s[8]
+    if ratio<=0 or width<=0 or height<=0 then return nil,nil,true,b end
+    local aw,ah=s[6]*ratio,s[7]*ratio
+    local x,y,scale,left,top
+    if s[2]==2 or viewport then
+        scale=math.min(aw/width,ah/height)
+        if scale<=0 then return nil,nil,true,b end
+        x,y=input_viewport_coordinates((px-s[4])*ratio,(py-s[5])*ratio,aw,ah,width,height)
+        local dw,dh
+        if aw/ah>width/height then dw,dh=math.floor(ah*width/height),ah
+        else dw,dh=aw,math.floor(aw*height/width) end
+        left,top=math.floor(aw/2)-math.floor(dw/2),math.floor(ah/2)-math.floor(dh/2)
+    else
+        if aw<=20 or ah<=20 then return nil,nil,true,b end
+        local mode=s[9]
+        if mode==0 then
+            scale=math.min((aw-20)/width,(ah-20)/height)
+            local dw,dh
+            if (aw-20)/(ah-20)>width/height then dw,dh=math.floor((ah-20)*width/height),ah-20
+            else dw,dh=aw-20,math.floor((aw-20)*height/width) end
+            left,top=10+math.floor((aw-20)/2)-math.floor(dw/2),10+math.floor((ah-20)/2)-math.floor(dh/2)
+        else
+            if mode==1 then scale=1
+            elseif mode==2 and s[10]>0 then scale=s[10]/width
+            elseif mode==-1 and s[10]>0 and s[11]>0 then
+                local low=math.max(s[10]/width,s[11]/height)
+                local high=math.min((s[10]+1)/width,(s[11]+1)/height)
+                if high<=low then return nil,nil,true,b end
+                scale=(low+high)/2
+                local stepped=8^(math.floor(math.log(scale)/math.log(8)*32+.5)/32)
+                if stepped>=low-1e-6 and stepped<high+1e-6 then scale=stepped end
+            else return nil,nil,true,b end
+            local function truncate(v) return v<0 and math.ceil(v) or math.floor(v) end
+            left=10+truncate((aw-20-width*scale)/2)+s[12]
+            top=10+truncate((ah-20-height*scale)/2)+s[13]
+        end
+        x,y=((px-s[4])*ratio-left)/scale,((py-s[5])*ratio-top)/scale
+    end
+    if not x or x<0 or y<0 or x>=width or y>=height then return nil,nil,true,b end
+    b.mapping={left=s[4]+left/ratio,top=s[5]+top/ratio,scale=scale/ratio,window=s[3]}
+    return x,y,true,b
+end
 end
 local function input_windows_title(window, wide)
     local title = ffi.new(wide and "uint16_t[512]" or "char[512]")
@@ -9002,11 +9219,18 @@ local function projector_command(ctx,state,args)
     local scene=obslua.obs_frontend_get_current_scene()
     if not scene then return false,"Projector Error: OBS has no current scene" end
     local preview_width,preview_height
-    if host_os=="Windows" then
+    if host_os=="Windows" or host_os=="OSX" then
         preview_width=tonumber(obslua.obs_source_get_width(scene))
         preview_height=tonumber(obslua.obs_source_get_height(scene))
     end
     obslua.obs_source_release(scene)
+    if host_os=='OSX' then
+        local b=mac_input.backend
+        if b and b.snapshot and b.snapshot[2]==2 and mac_input.focused(b) then
+            ctx.input_preview={width=preview_width,height=preview_height};ctx.input_viewport=nil
+            return true
+        end
+    end
     if not raymaze_frontend_lib then
         local library,err=host_library("obs-frontend-api")
         if not library then return false,"Projector Error: "..tostring(err) end
@@ -9027,6 +9251,10 @@ local function projector_command(ctx,state,args)
     if host_os=="Windows" then
         local ok,err=input_ui_post_projector(monitor,ctx.input_preview_menu_blocked)
         if not ok then return false,"Projector Error: "..tostring(err) end
+    elseif host_os=='OSX' then
+        local b,why=mac_input.open()
+        if not b then return false,'Projector Error: '..tostring(why) end
+        b.bridge.post(b.bridge.projector_callback,ffi.cast('void*',monitor))
     else
         local ok,err=pcall(function()
             raymaze_frontend_lib.obs_frontend_open_projector("Preview",monitor,nil,nil)
@@ -9035,7 +9263,7 @@ local function projector_command(ctx,state,args)
     end
     -- The new projector is a scene preview. Bind it for focused keyboard and
     -- mapped pointer input without requiring a second script command.
-    if host_os=="Windows" and preview_width and preview_height and
+    if (host_os=="Windows" or host_os=="OSX") and preview_width and preview_height and
        preview_width>0 and preview_height>0 then
         ctx.input_preview={width=preview_width,height=preview_height}
         ctx.input_viewport=nil
@@ -9169,11 +9397,13 @@ local function input_x11_viewport(name,width,height)
     return x,y,true
 end
 function input_host.viewport_pointer(name,width,height)
+    if host_os=='OSX' then return mac_input.map(mac_input.backend,width,height,{name=name}) end
     if host_os=="Windows" then return input_windows_viewport(name,width,height) end
     if host_os=="Linux" then return input_x11_viewport(name,width,height) end
     return nil
 end
 function input_host.scene_preview_pointer(handle,width,height)
+    if host_os=='OSX' then return mac_input.map(mac_input.backend,width,height) end
     if host_os=="Windows" then
         return input_windows_scene_preview(handle,width,height)
     end
@@ -9183,6 +9413,7 @@ function input_host.key_down(code, name)
     if interaction_current and interaction_current.input_focused then
         return interaction_current.input_keys[name] == true
     end
+    if host_os=='OSX' then return mac_input.backend and mac_input.key(mac_input.backend,name) or false end
     if host_os == "Linux" and x11_keyboard and x11_keyboard.focus_is_obs then
         local backend = x11_keyboard
         if name:sub(1,6)=="MOUSE_" then
@@ -9242,6 +9473,19 @@ end
 -- A one-shot warp, not a hook or persistent OS capture. Calls stop having
 -- any effect as soon as the script stops polling, loses focus, or leaves play.
 function input_host.recenter_pointer(ctx,sample)
+    if host_os=='OSX' and not interaction_current then
+        local b=mac_input.backend
+        local result={supported=b and 1 or 0,warped=0,x=sample.x,y=sample.y}
+        local viewport=ctx.input_preview or ctx.input_viewport
+        local mapping=b and b.mapping
+        if viewport and mapping and sample.focused and sample.mouse_inside and mac_input.focused(b) and
+           b.snapshot[3]==mapping.window then
+            local x,y=viewport.width/2,viewport.height/2
+            local point=ffi.new('im3_mac_point',{mapping.left+x*mapping.scale,mapping.top+y*mapping.scale})
+            if b.cg.CGWarpMouseCursorPosition(point)==0 then result.x,result.y,result.warped=x,y,1 end
+        end
+        return result
+    end
     local result={supported=(host_os=="Windows" and not interaction_current) and 1 or 0,warped=0,
         x=sample.x,y=sample.y}
     if result.supported==0 or not sample.focused or not sample.mouse_inside or
@@ -9285,13 +9529,13 @@ local input_codes = {
     UP=0x26, DOWN=0x28, LEFT=0x25, RIGHT=0x27,
     ENTER=0x0D, SPACE=0x20, ESCAPE=0x1B, TAB=0x09, BACKSPACE=0x08,
     DELETE=0x2E, HOME=0x24, END=0x23,
-    SHIFT=0x10, CTRL=0x11, ALT=0x12,
+    SHIFT=0x10, CTRL=0x11, ALT=0x12, META=0x5B,
     NUMPAD_MULTIPLY=0x6A, NUMPAD_ADD=0x6B, NUMPAD_SEPARATOR=0x6C,
     NUMPAD_SUBTRACT=0x6D, NUMPAD_DECIMAL=0x6E, NUMPAD_DIVIDE=0x6F,
     MOUSE_LEFT=0x01, MOUSE_RIGHT=0x02, MOUSE_MIDDLE=0x04,
     MOUSE_X1=0x05, MOUSE_X2=0x06,
 }
-local input_aliases = {RETURN="ENTER", ESC="ESCAPE", CONTROL="CTRL", DEL="DELETE",
+local input_aliases = {RETURN="ENTER", ESC="ESCAPE", CONTROL="CTRL", DEL="DELETE", CMD="META", COMMAND="META",
                        MOUSE1="MOUSE_LEFT", MOUSE2="MOUSE_RIGHT",
                        MOUSE3="MOUSE_MIDDLE"}
 for code=string.byte("A"),string.byte("Z") do
@@ -9318,6 +9562,21 @@ local function input_name(raw)
 end
 local function input_poll(ctx, requested, include_pointer)
     local handle=interaction_current
+    if not handle and host_os=='OSX' then
+        local why
+        handle,why=mac_input.open()
+        if handle then
+            ctx.input_window=handle;mac_input.sample(handle,ctx)
+            if not ctx.input_preview and not ctx.input_viewport and handle.snapshot and handle.snapshot[2]==2 then
+                local scene=obslua.obs_frontend_get_current_scene()
+                if scene then
+                    local w,h=tonumber(obslua.obs_source_get_width(scene)),tonumber(obslua.obs_source_get_height(scene))
+                    obslua.obs_source_release(scene)
+                    if w and h and w>0 and h>0 then ctx.input_preview={width=w,height=h} end
+                end
+            end
+        else mac_input.warn(why) end
+    end
     if not handle and host_os == "Windows" then
         handle=ctx.input_window
     end
@@ -9330,7 +9589,7 @@ local function input_poll(ctx, requested, include_pointer)
         local err
         handle,err=linux_x11_keyboard()
         if not handle then return nil,err end
-    elseif not handle and not ctx.input_interaction_notice then
+    elseif not handle and host_os~='OSX' and not ctx.input_interaction_notice then
         ctx.input_interaction_notice=true
         obslua.script_log(obslua.LOG_WARNING,
             "[4IM3-SCRIPT] Open Interact on a 4IM3 renderer source for keyboard and mouse input on " ..
@@ -9887,6 +10146,29 @@ for _,key in ipairs({
 engine["input"] = function(ctx,state,args)
     local action=tostring(args[1] or "")
     if args._input_handler or INPUT_EVENTS.is_handler('input',args) then return INPUT_EVENTS.register(ctx,args) end
+    if action=='status' then
+        if #args~=2 or tostring(args[2])=='' then return false,'Input Error: Expected status | output_variable' end
+        local value={platform=host_os,backend=host_os=='Windows' and 'win32' or host_os=='Linux' and 'x11' or 'unsupported',
+            available=0,permission='not_required',ready=0,error=''}
+        if interaction_current then
+            value.backend,value.available,value.ready='interact',1,1
+        elseif host_os=='OSX' then
+            local b,why=mac_input.open()
+            value.backend='quartz'
+            if b then
+                mac_input.sample(b,ctx)
+                value.available=1;value.permission=mac_input.permission(b) and 'granted' or 'denied'
+                value.ready=b.snapshot and b.snapshot[14]==1 and 1 or 0
+                value.error=value.permission=='denied' and 'Enable OBS Input Monitoring in System Settings > Privacy & Security' or b.geometry_error or ''
+            else value.error=why or 'macOS input unavailable' end
+        elseif host_os=='Windows' then value.available,value.ready=1,1
+        elseif host_os=='Linux' then
+            local b,why=linux_x11_keyboard();value.available=b and 1 or 0;value.ready=value.available;value.error=why or ''
+        end
+        local written=update_variable_state(ctx,tostring(args[2]),value)
+        if is_fatal(written) then return false,written.msg end
+        return true
+    end
     if action=='remove' or action=='clear' or action=='off' then
         local key=tostring(args[2] or '')
         if key=='all' and #args==2 then
@@ -9938,8 +10220,8 @@ engine["input"] = function(ctx,state,args)
         if args[2] ~= nil and tostring(args[2]) ~= "focus" then
             return false,"Input Error: Expected !input | preview | optional focus |+|"
         end
-        if host_os~="Windows" then
-            return false,"Input Error: Main scene preview pointer polling requires Windows"
+        if host_os~="Windows" and host_os~="OSX" then
+            return false,"Input Error: Main scene preview pointer polling requires Windows or macOS"
         end
         local scene=obslua.obs_frontend_get_current_scene()
         if not scene then return false,"Input Error: No active scene" end
@@ -9952,6 +10234,7 @@ engine["input"] = function(ctx,state,args)
         ctx.input_preview={width=width,height=height}
         ctx.input_viewport=nil
         if args[2] == "focus" then
+            if host_os=='OSX' then return false,'Input Error: Click the macOS OBS preview to focus it; automatic focus requires Windows' end
             local ok,err=input_ui_focus_preview()
             if not ok then return false,"Input Error: "..tostring(err) end
         end
@@ -9989,7 +10272,7 @@ engine["input"] = function(ctx,state,args)
             text_focused=true
             typed=handle.input_text or ""
             handle.input_text=""
-        elseif host_os=="Windows" or host_os=="Linux" then
+        elseif host_os=="Windows" or host_os=="Linux" or host_os=='OSX' then
             local sample,err=input_poll(ctx,{},false)
             if not sample then return false,"Input Error: " .. tostring(err) end
             text_focused=sample.focused
@@ -10000,6 +10283,7 @@ engine["input"] = function(ctx,state,args)
                 local shifted=input_host.key_down(input_codes.SHIFT,"SHIFT")
                 local modified=input_host.key_down(input_codes.CTRL,"CTRL") or
                     input_host.key_down(input_codes.ALT,"ALT")
+                if host_os=='OSX' then modified=modified or input_host.key_down(input_codes.META,'META') end
                 local out={}
                 for _,key in ipairs(input_text_keys) do
                     local down=input_host.key_down(key[2],key[1])
@@ -10075,7 +10359,7 @@ engine["input"] = function(ctx,state,args)
             end
         end
     else
-        return false,"Input Error: Expected key, mouse, pointer, recenter, focus, snapshot, keys, text, wheel, preview, preview_menu, viewport, press, release, hold, or off"
+        return false,"Input Error: Expected key, mouse, pointer, recenter, focus, status, snapshot, keys, text, wheel, preview, preview_menu, viewport, press, release, hold, remove, or clear"
     end
     local requested=key and {key} or {}
     if action=="snapshot" or action=="keys" then
@@ -10091,12 +10375,15 @@ engine["input"] = function(ctx,state,args)
             if type(written)=="table" and written._is_fatal_error then return false,written.msg end
             return true
         end
-        update_variable_state(ctx,tostring(args[3]),state.down and 1 or 0)
+        local written=update_variable_state(ctx,tostring(args[3]),state.down and 1 or 0)
+        if is_fatal(written) then return false,written.msg end
         if args[4] and tostring(args[4])~="" then
-            update_variable_state(ctx,tostring(args[4]),state.pressed and 1 or 0)
+            written=update_variable_state(ctx,tostring(args[4]),state.pressed and 1 or 0)
+            if is_fatal(written) then return false,written.msg end
         end
         if args[5] and tostring(args[5])~="" then
-            update_variable_state(ctx,tostring(args[5]),state.released and 1 or 0)
+            written=update_variable_state(ctx,tostring(args[5]),state.released and 1 or 0)
+            if is_fatal(written) then return false,written.msg end
         end
     elseif action=="pointer" then
         if args._result_target then
@@ -10105,9 +10392,12 @@ engine["input"] = function(ctx,state,args)
             if type(written)=="table" and written._is_fatal_error then return false,written.msg end
             return true
         end
-        update_variable_state(ctx,tostring(args[2]),snapshot.x)
-        update_variable_state(ctx,tostring(args[3]),snapshot.y)
-        update_variable_state(ctx,tostring(args[4]),snapshot.mouse_inside and 1 or 0)
+        local written=update_variable_state(ctx,tostring(args[2]),snapshot.x)
+        if is_fatal(written) then return false,written.msg end
+        written=update_variable_state(ctx,tostring(args[3]),snapshot.y)
+        if is_fatal(written) then return false,written.msg end
+        written=update_variable_state(ctx,tostring(args[4]),snapshot.mouse_inside and 1 or 0)
+        if is_fatal(written) then return false,written.msg end
     elseif action=="snapshot" or action=="keys" then
         local values={focused=snapshot.focused and 1 or 0}
         if action=="snapshot" then
@@ -11647,7 +11937,20 @@ engine.ui=function(ctx,state,args)
         return true
     end
     local ui=ctx.ui_state;if not ui then return fail('Create a UI first with !ui | create') end
-    if action=='clear' and #args==1 then
+    if action=='use' then
+        if #args~=2 then return fail('Expected use | UI_canvas_name') end
+        local name=INPUT_EVENTS.selector(args[2])
+        for _,surface in ipairs(ui.surfaces) do
+            if surface.name==name then ui.selected=surface;return true end
+        end
+        local value=resolve_path(ctx,name)
+        if type(value)=='string' then
+            for _,surface in ipairs(ui.surfaces) do
+                if surface.name==value then ui.selected=surface;return true end
+            end
+        end
+        return fail("No UI canvas named '"..name.."'")
+    elseif action=='clear' and #args==1 then
         ENGINE_UI.clear(ctx);return true
     elseif action=='update' or action=='blur' then
         if #args~=1 then return fail(action..' takes no arguments') end
@@ -11658,7 +11961,9 @@ engine.ui=function(ctx,state,args)
         if not fields.into then return fail('state requires -> | variable or into:variable') end
         local result=update_variable_state(ctx,fields.into,{focused=ui.focus and ui.focus.name or '',
             hovered=ui.hover and ui.hover.name or '',pointer_captured=ui.pointer_captured and 1 or 0,
-            keyboard_captured=ui.keyboard_captured and 1 or 0,error=ui.error or ''})
+            keyboard_captured=ui.keyboard_captured and 1 or 0,error=ui.error or '',
+            surface=ui.selected and ui.selected.name or '',width=ui.selected and ui.selected.width or 0,
+            height=ui.selected and ui.selected.height or 0})
         if is_fatal(result) then return fail(result.msg) end;return true
     end
     local name=INPUT_EVENTS.selector(args[2]);if name=='' then return fail('Missing control name') end
@@ -14552,6 +14857,277 @@ end
 -- A message-only Windows window dispatches UI work without making the game
 -- tick wait for OBS's UI thread. The isolated state owns its window callbacks.
 -- DestroyWindow on unload invalidates queued requests before that state closes.
+if host_os=='OSX' then
+-- This callback belongs to its own Lua state. No callback enters the game's
+-- Lua state from the UI thread. FIFO UI tasks also order state destruction.
+mac_input.ui_code=[=[
+local ffi=require('ffi')
+ffi.cdef[[
+    typedef struct { double x,y; } im3_mac_point;
+    typedef struct { double w,h; } im3_mac_size;
+    typedef struct { im3_mac_point origin; im3_mac_size size; } im3_mac_rect;
+    typedef struct { uintptr_t words[3]; } im3_mac_qstring;
+    typedef struct {
+        int32_t refs,pending,sequence,failed;
+        double values[14]; char title[512]; char error[256];
+    } im3_mac_input_shared;
+    typedef void (*im3_mac_task)(void *);
+    void *objc_getClass(const char *);
+    void *sel_registerName(const char *);
+    void *objc_msgSend(void *,void *,...);
+    void objc_msgSend_stret(void *,void *,void *,...);
+    void *dlsym(void *,const char *);
+    int32_t OSAtomicIncrement32Barrier(volatile int32_t *);
+    int32_t OSAtomicDecrement32Barrier(volatile int32_t *);
+    int32_t OSAtomicAdd32Barrier(int32_t,volatile int32_t *);
+    bool OSAtomicCompareAndSwap32Barrier(int32_t,int32_t,volatile int32_t *);
+    void free(void *);
+    uint32_t CGMainDisplayID(void);
+    im3_mac_rect CGDisplayBounds(uint32_t);
+    void *obs_frontend_get_main_window_handle(void);
+    void obs_frontend_open_projector(const char *,int,const char *,const char *);
+]]
+local system=ffi.load('/usr/lib/libSystem.B.dylib')
+local objc=ffi.load('/usr/lib/libobjc.A.dylib')
+local appkit=ffi.load('/System/Library/Frameworks/AppKit.framework/AppKit')
+local cg=ffi.load('/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices')
+local frontend=ffi.load(im3_mac_frontend)
+local shared=ffi.cast('im3_mac_input_shared*',im3_mac_shared)
+local atomic=ffi.cast('int32_t*',shared)
+local owner=newproxy(true)
+system.OSAtomicIncrement32Barrier(atomic)
+getmetatable(owner).__gc=function()
+    if system.OSAtomicDecrement32Barrier(atomic)==0 then system.free(shared) end
+end
+_G.im3_mac_owner=owner
+local selectors={}
+local function sel(name)
+    if not selectors[name] then selectors[name]=objc.sel_registerName(name) end
+    return selectors[name]
+end
+local object=ffi.cast('void* (*)(void*,void*)',objc.objc_msgSend)
+local boolean=ffi.cast('bool (*)(void*,void*)',objc.objc_msgSend)
+local integer=ffi.cast('intptr_t (*)(void*,void*)',objc.objc_msgSend)
+local real=ffi.cast('double (*)(void*,void*)',objc.objc_msgSend)
+local rect_address=ffi.arch=='x64' and objc.objc_msgSend_stret or objc.objc_msgSend
+local rect=ffi.cast('im3_mac_rect (*)(void*,void*)',rect_address)
+local convert=ffi.cast('im3_mac_rect (*)(void*,void*,im3_mac_rect,void*)',rect_address)
+local toscreen=ffi.cast('im3_mac_rect (*)(void*,void*,im3_mac_rect)',rect_address)
+local function present(value) return value~=nil and value~=ffi.NULL end
+local function text(value)
+    if not present(value) then return '' end
+    local bytes=object(value,sel('UTF8String'))
+    return present(bytes) and ffi.string(bytes) or ''
+end
+local function bounds(view,window)
+    local local_rect=rect(view,sel('bounds'))
+    local in_window=convert(view,sel('convertRect:toView:'),local_rect,nil)
+    local screen=toscreen(window,sel('convertRectToScreen:'),in_window)
+    local main=cg.CGDisplayBounds(cg.CGMainDisplayID())
+    return tonumber(screen.origin.x),tonumber(main.size.h-screen.origin.y-screen.size.h),
+        tonumber(screen.size.w),tonumber(screen.size.h)
+end
+local qt,qt_error
+local function qt_api()
+    local function symbol(names,signature)
+        for name in names:gmatch('[^|]+') do
+            local address=system.dlsym(ffi.cast('void*',-2),name) -- RTLD_DEFAULT on Darwin.
+            if present(address) then return signature and ffi.cast(signature,address) or address end
+        end
+        error('OBS Qt metadata symbol unavailable: '..names)
+    end
+    local version=symbol('_Z8qVersionv','const char* (*)(void)')
+    assert(ffi.string(version()):match('^6%.'),'macOS preview metadata requires Qt 6')
+    return {
+        widget=symbol('_ZN7QWidget4findEy|_ZN7QWidget4findEm','void* (*)(uintptr_t)'),
+        meta=symbol('_ZN7QWidget16staticMetaObjectE'),
+        construct=symbol('_ZN7QStringC1EPK5QCharx|_ZN7QStringC1EPK5QCharl','void (*)(void*,const uint16_t*,intptr_t)'),
+        destroy=symbol('_ZN7QStringD1Ev','void (*)(void*)'),
+        data=symbol('_ZNK7QString9constDataEv','const uint16_t* (*)(const void*)'),
+        find=symbol('_Z20qt_qFindChild_helperPK7QObjectRK7QStringRK11QMetaObject6QFlagsIN2Qt15FindChildOptionEE',
+            'void* (*)(const void*,const void*,const void*,int)'),
+        window=symbol('_ZNK7QWidget14effectiveWinIdEv','uintptr_t (*)(void*)'),
+        index=symbol('_ZNK9QComboBox12currentIndexEv','int (*)(void*)'),
+        current=symbol('_ZNK9QComboBox11currentTextEv','im3_mac_qstring (*)(void*)'),
+        placeholder=symbol('_ZNK9QComboBox15placeholderTextEv','im3_mac_qstring (*)(void*)'),
+        position=symbol('_ZNK15QAbstractSlider14sliderPositionEv','int (*)(void*)'),
+    }
+end
+local function child(root,name)
+    local chars=ffi.new('uint16_t[?]',#name+1)
+    for i=1,#name do chars[i-1]=name:byte(i) end
+    local value=ffi.new('im3_mac_qstring[1]')
+    qt.construct(value,chars,#name)
+    local found=qt.find(root,value,qt.meta,1)
+    qt.destroy(value)
+    return present(found) and found or nil
+end
+local function qtext(widget,method)
+    local storage=ffi.new('im3_mac_qstring[1]');storage[0]=method(widget)
+    local value=qt.data(storage);local out={}
+    -- Only the numeric dimensions of these labels are consumed.
+    if present(value) then
+        for i=0,255 do
+            local code=tonumber(value[i]);if code==0 then break end
+            out[#out+1]=code<128 and string.char(code) or ' '
+        end
+    end
+    qt.destroy(storage)
+    return table.concat(out)
+end
+local current_title=''
+local function sample(values)
+    local title=''
+    local app=object(objc.objc_getClass('NSApplication'),sel('sharedApplication'))
+    if not present(app) or not boolean(app,sel('isActive')) then return values,title end
+    local window=object(app,sel('keyWindow'))
+    if not present(window) then return values,title end
+    title=text(object(window,sel('title')))
+    current_title=title
+    values[1],values[3]=1,tonumber(integer(window,sel('windowNumber')))
+    local main_view=frontend.obs_frontend_get_main_window_handle()
+    local main_window=present(main_view) and object(main_view,sel('window')) or nil
+    values[2]=window==main_window and 1 or title==im3_mac_projector_title and 2 or 3
+    values[8]=tonumber(real(window,sel('backingScaleFactor')))
+    local view=object(window,sel('contentView'))
+    if values[2]==2 and present(view) then
+        values[4],values[5],values[6],values[7]=bounds(view,window)
+        values[14]=1
+    elseif values[2]==1 or values[2]==3 then
+        if not qt then
+            if qt_error then error(qt_error) end
+            local ok,result=pcall(qt_api)
+            if not ok then qt_error=tostring(result);error(qt_error) end
+            qt=result
+        end
+        local root=qt.widget(ffi.cast('uintptr_t',values[2]==1 and main_view or view))
+        assert(present(root),'OBS main QWidget is unavailable')
+        local preview,mode=child(root,'preview'),child(root,'previewScalingMode')
+        if values[2]==3 then
+            preview=preview or child(root,'display')
+            if preview then
+                local display=ffi.cast('void*',qt.window(preview))
+                if present(display) then
+                    values[4],values[5],values[6],values[7]=bounds(display,window)
+                    values[14]=1
+                end
+            end
+            return values,title
+        end
+        local sx,sy=child(root,'previewXScrollBar'),child(root,'previewYScrollBar')
+        assert(preview and mode and sx and sy,'OBS preview metadata is unavailable')
+        view=ffi.cast('void*',qt.window(preview))
+        assert(present(view),'OBS preview NSView is unavailable')
+        values[4],values[5],values[6],values[7]=bounds(view,window)
+        values[9]=qt.index(mode)
+        local dimensions=values[9]==2 and qtext(mode,qt.current) or
+            values[9]==-1 and qtext(mode,qt.placeholder) or ''
+        local w,h=dimensions:match('(%d+)%D+(%d+)')
+        values[10],values[11]=tonumber(w) or 0,tonumber(h) or 0
+        values[12],values[13]=-qt.position(sx),-qt.position(sy)
+        values[14]=1
+    end
+    return values,title
+end
+-- Always publish focus/title even when an older Qt build cannot expose geometry.
+_G.im3_mac_callback=ffi.cast('im3_mac_task',function()
+    if system.OSAtomicAdd32Barrier(0,atomic)<2 then
+        system.OSAtomicCompareAndSwap32Barrier(1,0,atomic+1)
+        return -- The engine released its owner reference; do not touch OBS.
+    end
+    local values,title={0,0,0,0,0,0,0,1,0,0,0,0,0,0},''
+    current_title=''
+    local ok,result,name=pcall(sample,values)
+    local problem=''
+    if ok then values,title=result,name else problem=tostring(result);title=current_title end
+    system.OSAtomicIncrement32Barrier(atomic+2)
+    for i=1,14 do shared.values[i-1]=values[i] end
+    ffi.fill(shared.title,512);ffi.copy(shared.title,title,math.min(#title,511))
+    ffi.fill(shared.error,256);ffi.copy(shared.error,problem,math.min(#problem,255))
+    shared.failed=ok and 0 or 1
+    system.OSAtomicIncrement32Barrier(atomic+2)
+    system.OSAtomicCompareAndSwap32Barrier(1,0,atomic+1)
+end)
+ffi.cast('uintptr_t*',im3_mac_slot)[0]=ffi.cast('uintptr_t',im3_mac_callback)
+_G.im3_mac_projector_callback=ffi.cast('im3_mac_task',function(parameter)
+    if system.OSAtomicAdd32Barrier(0,atomic)<2 then return end
+    local ok,why=pcall(function()
+        frontend.obs_frontend_open_projector('Preview',tonumber(ffi.cast('uintptr_t',parameter)),nil,nil)
+    end)
+    if not ok then
+        system.OSAtomicIncrement32Barrier(atomic+2)
+        local problem=tostring(why);ffi.fill(shared.error,256)
+        ffi.copy(shared.error,problem,math.min(#problem,255));shared.failed=1
+        system.OSAtomicIncrement32Barrier(atomic+2)
+    end
+end)
+ffi.cast('uintptr_t*',im3_mac_slot)[1]=ffi.cast('uintptr_t',im3_mac_projector_callback)
+]=]
+function mac_input.ui_open(b)
+    native_worker_setup_api()
+    local memory=b.system.calloc(1,ffi.sizeof('im3_mac_input_shared'))
+    if memory==nil or memory==ffi.NULL then return nil,'Could not allocate macOS input snapshot' end
+    local shared=ffi.cast('im3_mac_input_shared*',memory)
+    shared.refs=1
+    local state=ffi.C.luaL_newstate()
+    if state==nil then b.system.free(memory);return nil,'Could not create macOS UI state' end
+    local bridge={state=state,shared=shared,atomic=ffi.cast('int32_t*',memory),slot=ffi.new('uintptr_t[2]')}
+    bridge.post=function(callback,parameter) b.system.dispatch_async_f(b.queue,parameter,callback) end
+    local ok,why=pcall(function()
+        local frontend=host_library_path('obs-frontend-api') or 'obs-frontend-api'
+        local front=assert(host_library('obs-frontend-api'))
+        local title=ffi.string(front.obs_frontend_get_locale_string('Projector.Title'))..' - '..
+            ffi.string(front.obs_frontend_get_locale_string('StudioMode.Preview'))
+        ffi.C.luaL_openlibs(state)
+        for name,pointer in pairs({im3_mac_shared=memory,im3_mac_slot=bridge.slot}) do
+            ffi.C.lua_pushlightuserdata(state,pointer);ffi.C.lua_setfield(state,-10002,name)
+        end
+        for name,value in pairs({im3_mac_frontend=frontend,im3_mac_projector_title=title}) do
+            ffi.C.lua_pushstring(state,value);ffi.C.lua_setfield(state,-10002,name)
+        end
+        local loaded=ffi.C.luaL_loadstring(state,mac_input.ui_code)
+        local ran=loaded==0 and ffi.C.lua_pcall(state,0,0,0) or loaded
+        if ran~=0 then error(ffi.string(ffi.C.lua_tolstring(state,-1,nil))) end
+        assert(bridge.slot[0]~=0 and bridge.slot[1]~=0,'macOS UI callbacks were not initialized')
+        bridge.callback=ffi.cast('im3_obs_task_t',bridge.slot[0])
+        bridge.projector_callback=ffi.cast('im3_obs_task_t',bridge.slot[1])
+    end)
+    if not ok then
+        ffi.C.lua_close(state)
+        if b.system.OSAtomicDecrement32Barrier(bridge.atomic)==0 then b.system.free(memory) end
+        return nil,tostring(why)
+    end
+    return bridge
+end
+function mac_input.ui_sample(b)
+    local bridge=b.bridge
+    if not bridge then return end
+    local now=engine_tick_now_ms()
+    if now>=(bridge.next_request or 0) and
+       b.system.OSAtomicCompareAndSwap32Barrier(0,1,bridge.atomic+1) then
+        bridge.next_request=now+8
+        bridge.post(bridge.callback,bridge.shared)
+    end
+    local version=tonumber(b.system.OSAtomicAdd32Barrier(0,bridge.atomic+2))
+    if version==0 or version%2~=0 then return end
+    local snapshot={}
+    for i=1,14 do snapshot[i]=tonumber(bridge.shared.values[i-1]) end
+    local title,problem=ffi.string(bridge.shared.title),ffi.string(bridge.shared.error)
+    if version~=tonumber(b.system.OSAtomicAdd32Barrier(0,bridge.atomic+2)) then return end
+    if bridge.version~=version then bridge.version=version;b.observed_ms=now end
+    b.snapshot,b.title,b.geometry_error=snapshot,title,problem
+end
+function mac_input.close()
+    local b=mac_input.backend
+    if not b or not b.bridge then return end
+    local bridge=b.bridge;b.bridge=nil;b.snapshot=nil;b.mapping=nil;b.focus_is_obs=false
+    -- The queued close follows every earlier sample. Never wait on the UI
+    -- thread while OBS may be holding the scripting lock during unload.
+    bridge.post(ffi.cast('im3_obs_task_t',ffi.C.lua_close),bridge.state)
+    if b.system.OSAtomicDecrement32Barrier(bridge.atomic)==0 then b.system.free(bridge.shared) end
+end
+end
+
 local preview_menu_bridge
 local preview_menu_ui_code = [=[
 local ffi = require("ffi")
@@ -16162,19 +16738,85 @@ engine["worker"] = function(ctx, state, args)
         end
         return true
     end
-    return false, "Native Worker Error: expected expression, label, start, get_result, cancel, remove, or stop_all"
+    return false, "Native Worker Error: Expected an expression, block, label, start, read, cancel, release, or clear | scope/program"
 end
 
 -- Read-only diagnostics. Lua memory belongs to this VM, not exclusively to one
 -- program; world counts include all worlds in this engine instance. No forced GC.
-engine["runtime"] = function(ctx, state, args)
-    if args[1]~="stats" or #args~=2 then
-        return false,"Runtime Error: Expected stats | into:variable or -> | variable"
+local runtime_tools={tick_fields={'tick_last_ms','tick_last_animation_ms','tick_last_events_ms',
+    'tick_last_async_ms','tick_last_main_ms','tick_last_collision_ms','tick_last_ui_ms',
+    'tick_last_background_ms','tick_last_worker_poll_ms','tick_last_mesh_prepare_ms',
+    'tick_last_interval_ms','tick_last_budget_ms','tick_last_cleanup_ms'}}
+function runtime_tools.reset(ctx)
+    for key in pairs(ctx) do if type(key)=='string' and key:match('^tick_last_') then ctx[key]=nil end end
+    ctx.runtime_tick_count,ctx.runtime_total_ms,ctx.runtime_peak_ms,ctx.runtime_min_ms=0,0,0,nil
+    ctx.runtime_completed_tick=nil
+end
+function runtime_tools.timings(ctx)
+    local program=ctx.native_worker_program or ctx
+    local completed=program.runtime_completed_tick or {}
+    local function ms(key) return math.max(0,tonumber(completed[key]) or 0) end
+    local count=program.runtime_tick_count or 0
+    local total,animation=ms('tick_last_ms'),ms('tick_last_animation_ms')
+    local result={ready=count>0 and 1 or 0,ticks=count,tick_ms=total,
+        interval_ms=ms('tick_last_interval_ms'),budget_ms=completed.tick_last_budget_ms or math.max(1,math.min(20,tonumber(program.tick_budget_ms) or 6)),
+        animation_ms=animation,events_ms=math.max(0,ms('tick_last_events_ms')-animation),
+        async_ms=ms('tick_last_async_ms'),main_ms=ms('tick_last_main_ms'),collision_ms=ms('tick_last_collision_ms'),
+        ui_ms=ms('tick_last_ui_ms'),background_ms=ms('tick_last_background_ms'),
+        cleanup_ms=ms('tick_last_cleanup_ms'),
+        worker_poll_ms=ms('tick_last_worker_poll_ms'),mesh_prepare_ms=ms('tick_last_mesh_prepare_ms'),
+        mean_ms=count>0 and (program.runtime_total_ms or 0)/count or 0,
+        min_ms=program.runtime_min_ms or 0,peak_ms=program.runtime_peak_ms or 0,jobs={},meshes={}}
+    result.budget_percent=total/result.budget_ms*100
+    result.obs_tick_fps=result.interval_ms>0 and 1000/result.interval_ms or 0
+    for name,task in pairs(program.native_workers or {}) do
+        local job={name=name,state=task.phase or ''}
+        for field,value in pairs(task.metrics or {}) do
+            if type(value)=='number' or type(value)=='string' or type(value)=='boolean' then job[field]=value end
+        end
+        result.jobs[#result.jobs+1]=job
     end
-    local target=tostring(args[2] or ""):match("^into:%s*(.+)$")
-    if not target then return false,"Runtime Error: stats needs into:variable or -> | variable" end
+    table.sort(result.jobs,function(a,b) return a.name<b.name end)
+    for name,world in pairs(world3d_worlds or {}) do
+        for object,job in pairs(world.mesh_jobs or {}) do
+            local mesh={world=name,name=object}
+            for field,value in pairs(job.status or {}) do
+                if type(value)=='number' or type(value)=='string' or type(value)=='boolean' then mesh[field]=value end
+            end
+            result.meshes[#result.meshes+1]=mesh
+        end
+    end
+    table.sort(result.meshes,function(a,b) return tostring(a.world)..'/'..tostring(a.name)<tostring(b.world)..'/'..tostring(b.name) end)
+    result.job_count,result.mesh_count=#result.jobs,#result.meshes
+    return result
+end
+engine["runtime"] = function(ctx, state, args)
+    local action=safe_trim(tostring(args[1] or '')):lower()
+    if action~='stats' and action~='timings' then
+        return false,"Runtime Error: Expected stats or timings | into:variable or -> | variable"
+    end
+    local target
+    for index=2,#args do
+        local fields,why=split_named_attribute_group(tostring(args[index]))
+        if not fields then return false,'Runtime Error: '..tostring(why) end
+        for _,part in ipairs(fields) do
+            local key,value=part:match('^%s*([%w_]+)%s*:%s*(.-)%s*$')
+            if not key or key:lower()~='into' then return false,'Runtime Error: Expected only into:variable for '..action end
+            if target then return false,'Runtime Error: Repeated into destination' end
+            if not valid_result_destination(value) then return false,'Runtime Error: Expected a variable name or table path after into:' end
+            target=value
+        end
+    end
+    if not target then return false,"Runtime Error: "..action.." needs into:variable or -> | variable" end
+    if action=='timings' then
+        local written=update_variable_state(ctx,target,runtime_tools.timings(ctx))
+        if is_fatal(written) then return false,written.msg end
+        return true
+    end
     local stats={lua_kib=collectgarbage("count"),workers_running=0,workers_retained=0,
-        tasks=0,handlers=0,worlds=0,objects=0,connections=0,peers=0}
+        tasks=0,handlers=0,worlds=0,objects=0,connections=0,peers=0,
+        ui_surfaces=ctx.ui_state and #(ctx.ui_state.surfaces or {}) or 0,
+        ui_surface=ctx.ui_state and ctx.ui_state.selected and ctx.ui_state.selected.name or ''}
     local program=ctx.native_worker_program or ctx
     for _,job in pairs(program.native_workers or {}) do
         stats.workers_retained=stats.workers_retained+1
@@ -16201,10 +16843,16 @@ end
 -- A module returns a factory that receives reusable renderer and command hooks.
 local module_command_names = {}
 engine["module"] = function(ctx, state, args)
-    if tostring(args[1] or "") ~= "load" then
+    if safe_trim(tostring(args[1] or "")):lower() ~= "load" or #args~=2 then
         return false, "Module Error: Expected load | path/to/module.lua"
     end
-    local path = tostring(args[2] or "")
+    local path = safe_trim(tostring(args[2] or ""))
+    if path:match('^".*"$') or path:match("^'.*'$") then
+        local value=resolve_path(ctx,path)
+        if is_fatal(value) then return false,'Module Error: '..value.msg end
+        if type(value)~='string' then return false,'Module Error: Expected a string path' end
+        path=value
+    end
     if path:sub(1, 5) == "file:" then path = path:sub(6) end
     if path == "" then return false, "Module Error: Missing module path" end
     if not path:match("^%a:[/\\]") and not path:match("^[/\\]") then
@@ -17710,6 +18358,9 @@ function resolve_pointer_keys(src, path)
                 if is_fatal and is_fatal(evaluated) then
                     return evaluated
                 end
+                if evaluated==nil or type(evaluated)=='number' and evaluated~=evaluated then
+                    return make_fatal('Variable Error: Table index cannot be nil or NaN in '..tostring(path))
+                end
 
                 table.insert(keys, tonumber(evaluated) or tostring(evaluated))
                 i = close_i + 1
@@ -17746,6 +18397,9 @@ function resolve_pointer_keys(src, path)
                 local evaluated_key = evaluate_math(src, inner)
                 if is_fatal and is_fatal(evaluated_key) then
                     return evaluated_key
+                end
+                if evaluated_key==nil or type(evaluated_key)=='number' and evaluated_key~=evaluated_key then
+                    return make_fatal('Variable Error: Table index cannot be nil or NaN in '..tostring(path))
                 end
                 local num_key = tonumber(evaluated_key)
                 table.insert(keys, num_key or evaluated_key)
@@ -18785,6 +19439,7 @@ end
 
 -- [[ RUN CODE ]]
 function run_code(src, settings)
+    if runtime_tools then runtime_tools.reset(src) end
     if not src or not settings then
         return error("4IM3-SCRIPT: Something wrong happened, please try again")
     end
@@ -20491,6 +21146,7 @@ function script_tick(fps)
     -- Rotate the first background consumer so both kinds make progress when
     -- only a fraction of their usual maximum slice remains.
     local background_start_ms=tick_end_ms
+    src.tick_last_worker_poll_ms,src.tick_last_mesh_prepare_ms=0,0
     local turn=src.tick_background_turn or 0
     src.tick_background_turn=1-turn
     for stage=1,2 do
@@ -20499,14 +21155,16 @@ function script_tick(fps)
         if (stage+turn)%2==1 then
             if src.native_workers then
                 native_worker_poll_all(src,math.min(tick_deadline_ms,now+tick_budget_ms*.15))
+                src.tick_last_worker_poll_ms=src.tick_last_worker_poll_ms+engine_tick_now_ms()-now
             end
         elseif world3d_mesh_tick then
             world3d_mesh_tick(math.min(tick_deadline_ms,now+tick_budget_ms*.20))
+            src.tick_last_mesh_prepare_ms=src.tick_last_mesh_prepare_ms+engine_tick_now_ms()-now
         end
     end
     tick_end_ms=engine_tick_now_ms()
     src.tick_last_background_ms=tick_end_ms-background_start_ms
-    src.tick_last_ms = tick_end_ms - tick_start_ms
+    local cleanup_start_ms=tick_end_ms
     src.tick_deadline_ms = nil
     if src.tcp_connections and src.current_idx > #src.queue and #(src.async_tasks or {}) == 0 and
        not next(src.input_handlers or {}) and not src.ui_state then
@@ -20515,6 +21173,19 @@ function script_tick(fps)
     if (src.input_preview_menu_blocked or src.input_projector_controls) and
        src.current_idx > #src.queue and #(src.async_tasks or {}) == 0 and not next(src.input_handlers or {}) and not src.ui_state then
         input_preview_menu_release(src)
+    end
+    tick_end_ms=engine_tick_now_ms()
+    src.tick_last_cleanup_ms=tick_end_ms-cleanup_start_ms
+    src.tick_last_ms = tick_end_ms - tick_start_ms
+    src.tick_last_interval_ms=math.max(0,tonumber(fps) or 0)*1000
+    src.runtime_tick_count=(src.runtime_tick_count or 0)+1
+    src.runtime_total_ms=(src.runtime_total_ms or 0)+src.tick_last_ms
+    src.runtime_peak_ms=math.max(src.runtime_peak_ms or 0,src.tick_last_ms)
+    src.runtime_min_ms=math.min(src.runtime_min_ms or src.tick_last_ms,src.tick_last_ms)
+    if runtime_tools then
+        src.tick_last_budget_ms=tick_budget_ms
+        local completed=src.runtime_completed_tick or {};src.runtime_completed_tick=completed
+        for _,field in ipairs(runtime_tools.tick_fields) do completed[field]=src[field] end
     end
     if src.tick_last_ms > math.max(tick_budget_ms * 2, 12) and
         (not src.next_budget_warning_ms or tick_end_ms >= src.next_budget_warning_ms) then
@@ -20603,6 +21274,7 @@ function script_load(settings)
             if src.native_workers then native_worker_cancel_all(src) end
             for _,world in pairs(world3d_worlds or {}) do world3d_cancel_builds(world) end
             input_wheel_release()
+            if host_os=='OSX' then mac_input.close() end
             if x11_keyboard then
                 x11_keyboard.library.XCloseDisplay(x11_keyboard.display)
                 x11_keyboard = nil
@@ -20655,6 +21327,7 @@ function script_unload()
     if src.native_workers then native_worker_cancel_all(src) end
     for _,world in pairs(world3d_worlds or {}) do world3d_cancel_builds(world) end
     input_wheel_release()
+    if host_os=='OSX' then mac_input.close() end
     if x11_keyboard then
         x11_keyboard.library.XCloseDisplay(x11_keyboard.display)
         x11_keyboard = nil
