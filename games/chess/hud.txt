@@ -1,0 +1,35 @@
+-- Compact game status bar. Hidden whenever the home/pause/waiting UI is open.
+!fn | chess_hud | {
+    !canvas | use | name:ChessHUD |+|
+    !canvas | fill | red:0,green:0,blue:0,opacity:0 |+|
+    !chess_ui_panel | 12 | 12 | screen.width-24 | 92 | 14 | 23 | 36 |+|
+    !canvas | rectangle | x:12,y:25,width:3,height:64 | red:234,green:195,blue:116 |+|
+    !var | mode_name | (mode == 1 and "VS COMPUTER" or "LOCAL PLAY") |+|
+    !if | mode == 2 {
+        !var | mode_name | (net_side == 1 and "ONLINE / WHITE" or "ONLINE / BLACK") |+|
+    } |+|
+    !var | view_name | (cam_mode == 1 and "FIRST PERSON" or "ORBIT") |+|
+    !var | selection_name | (selected_piece > 0 and piece_label[selected_piece] or "NONE") |+|
+    !var | turn_name | (turn == 1 and "WHITE TO MOVE" or "BLACK TO MOVE") |+|
+    !if | mode == 1 and turn == -1 { !var | turn_name | "COMPUTER TURN" |+| } |+|
+    !if | mode == 2 { !var | turn_name | (turn == net_side and "YOUR TURN" or "OPPONENT TURN") |+| } |+|
+    !if | game_over == 1 { !var | turn_name | "MATCH COMPLETE" |+| } |+|
+    !chess_ui_text | "CHESS" | 30 | 24 | 3 | 249 | 215 | 146 |+|
+    !chess_ui_text | "(mode_name) / (view_name)" | 150 | 27 | 2 | 154 | 178 | 203 |+|
+    !chess_ui_panel | screen.width-232 | 20 | 200 | 28 |
+        (turn == 1 and 28 or 69) | (turn == 1 and 66 or 37) | (turn == 1 and 86 or 43) | 5 |+|
+    !chess_ui_text | turn_name | screen.width-220 | 27 | 2 | 237 | 242 | 249 |+|
+    !chess_ui_text | string.sub(status,1,math.floor((screen.width-60)/12)) |
+        30 | 54 | 2 | 236 | 242 | 250 |+|
+    !chess_ui_text | "(selection_name) / LAST: (last_move)" |
+        30 | 82 | 2 | 151 | 181 | 207 |+|
+    !chess_ui_text | "TAB MENU  F FULLSCREEN" | screen.width-300 | 82 | 2 | 151 | 181 | 207 |+|
+    !canvas | update |+|
+    -- canvas use makes a source visible; background game updates must not
+    -- reveal this HUD over the home/pause/waiting overlay.
+    !if | menu_visible == 1 or net_waiting == 1 {
+        !source | ChessHUD |+|
+        !hide |+|
+        !source |+|
+    } |+|
+} |+|
