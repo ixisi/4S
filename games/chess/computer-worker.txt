@@ -1,0 +1,124 @@
+-- Runs only inside !worker. Normal startup jumps over the worker label.
+-- Return (black piece ID - 17) * 64 + destination square, or 0.
+!jump | chess_worker_end |+|
+!label | <chess_worker_search> |+|
+!var | worker_best_code | 0 |+|
+!var | worker_best_score | -1000000 |+|
+!var | worker_piece | 17 |+|
+!label | chess_worker_piece |+|
+!if | worker_piece > 32 | chess_worker_done |+|
+!if | piece_alive[worker_piece] != 1 | chess_worker_next_piece |+|
+!var | worker_file | piece_file[worker_piece] |+|
+!var | worker_rank | piece_rank[worker_piece] |+|
+!var | worker_kind | kind[worker_piece] |+|
+!var | worker_index | 1 |+|
+!if | worker_kind == 6 | chess_worker_pawn |+|
+!if | worker_kind == 5 | chess_worker_knight |+|
+!if | worker_kind == 1 | chess_worker_king |+|
+!var | worker_direction | 1 |+|
+!var | worker_distance | 1 |+|
+!jump | chess_worker_ray |+|
+
+!label | chess_worker_pawn |+|
+!if | worker_index > 4 | chess_worker_next_piece |+|
+!if | worker_index == 2 and (worker_rank != 7 or piece_moved[worker_piece] != 0) | chess_worker_next_pawn |+|
+!var | worker_to_file | worker_file + (worker_index == 3 and -1 or worker_index == 4 and 1 or 0) |+|
+!var | worker_to_rank | worker_rank - (worker_index == 2 and 2 or 1) |+|
+!jump | chess_worker_try |+|
+!label | chess_worker_next_pawn |+|
+!var | worker_index | worker_index + 1 |+|
+!jump | chess_worker_pawn |+|
+
+!label | chess_worker_knight |+|
+!if | worker_index > 8 | chess_worker_next_piece |+|
+!var | worker_to_file | worker_file + worker_knight_df[worker_index] |+|
+!var | worker_to_rank | worker_rank + worker_knight_dr[worker_index] |+|
+!jump | chess_worker_try |+|
+!label | chess_worker_next_knight |+|
+!var | worker_index | worker_index + 1 |+|
+!jump | chess_worker_knight |+|
+
+!label | chess_worker_king |+|
+!if | worker_index > 10 | chess_worker_next_piece |+|
+!if | worker_index > 8 | chess_worker_castle |+|
+!var | worker_to_file | worker_file + worker_king_df[worker_index] |+|
+!var | worker_to_rank | worker_rank + worker_king_dr[worker_index] |+|
+!jump | chess_worker_try |+|
+!label | chess_worker_castle |+|
+!if | piece_moved[worker_piece] != 0 | chess_worker_next_king |+|
+!var | worker_to_file | worker_file + (worker_index == 9 and -2 or 2) |+|
+!var | worker_to_rank | worker_rank |+|
+!var | worker_rook | (worker_index == 9 and 19 or 20) |+|
+!if | piece_alive[worker_rook] != 1 or piece_moved[worker_rook] != 0 | chess_worker_next_king |+|
+!if | worker_index == 9 and board[(worker_rank - 1) * 8 + 2] != 0 | chess_worker_next_king |+|
+!if | board[(worker_rank - 1) * 8 + worker_file + (worker_index == 9 and -1 or 1)] != 0 | chess_worker_next_king |+|
+!jump | chess_worker_try |+|
+!label | chess_worker_next_king |+|
+!var | worker_index | worker_index + 1 |+|
+!jump | chess_worker_king |+|
+
+!label | chess_worker_ray |+|
+!if | worker_direction > 8 | chess_worker_next_piece |+|
+!if | worker_kind == 3 and worker_direction > 4 | chess_worker_next_ray |+|
+!if | worker_kind == 4 and worker_direction <= 4 | chess_worker_next_ray |+|
+!var | worker_to_file | worker_file + worker_ray_df[worker_direction] * worker_distance |+|
+!var | worker_to_rank | worker_rank + worker_ray_dr[worker_direction] * worker_distance |+|
+!if | worker_to_file < 1 or worker_to_file > 8 or worker_to_rank < 1 or worker_to_rank > 8 | chess_worker_next_ray |+|
+!var | worker_ray_square | (worker_to_rank - 1) * 8 + worker_to_file |+|
+!var | worker_ray_blocked | board[worker_ray_square] |+|
+!if | worker_ray_blocked > 0 and side[worker_ray_blocked] == -1 | chess_worker_next_ray |+|
+!jump | chess_worker_try |+|
+!label | chess_worker_after_ray |+|
+!if | worker_ray_blocked > 0 | chess_worker_next_ray |+|
+!var | worker_distance | worker_distance + 1 |+|
+!if | worker_distance > 7 | chess_worker_next_ray |+|
+!jump | chess_worker_ray |+|
+!label | chess_worker_next_ray |+|
+!var | worker_direction | worker_direction + 1 |+|
+!var | worker_distance | 1 |+|
+!jump | chess_worker_ray |+|
+
+!label | chess_worker_try |+|
+!if | worker_to_file < 1 or worker_to_file > 8 or worker_to_rank < 1 or worker_to_rank > 8 | chess_worker_advance |+|
+!var | worker_square | (worker_to_rank - 1) * 8 + worker_to_file |+|
+!var | worker_target | board[worker_square] |+|
+!if | worker_target > 0 and side[worker_target] == -1 | chess_worker_advance |+|
+!if | worker_target > 0 and kind[worker_target] == 1 | chess_worker_advance |+|
+!var | worker_capture | worker_target |+|
+!if | worker_kind == 6 | chess_worker_pawn_shape |+|
+!if | worker_kind == 1 and worker_index > 8 and worker_target > 0 | chess_worker_advance |+|
+!jump | chess_worker_score |+|
+!label | chess_worker_pawn_shape |+|
+!if | worker_index <= 2 and worker_target > 0 | chess_worker_advance |+|
+!if | worker_index == 2 and board[(worker_rank - 2) * 8 + worker_file] > 0 | chess_worker_advance |+|
+!if | worker_index >= 3 and worker_target > 0 | chess_worker_score |+|
+!if | worker_index >= 3 and worker_to_file == ep_file and worker_to_rank == ep_rank and ep_victim > 0 | chess_worker_ep |+|
+!if | worker_index >= 3 | chess_worker_advance |+|
+!jump | chess_worker_score |+|
+!label | chess_worker_ep |+|
+!var | worker_capture | ep_victim |+|
+
+!label | chess_worker_score |+|
+!var | worker_code | (worker_piece - 17) * 64 + worker_square |+|
+!if | ai_rejected[worker_code] == 1 | chess_worker_advance |+|
+!var | worker_capture_score | (worker_capture > 0 and piece_value[kind[worker_capture]] * 100 or 0) |+|
+!var | worker_center_score | 18 - 4 * (math.abs(worker_to_file - 4.5) + math.abs(worker_to_rank - 4.5)) |+|
+!var | worker_pawn_score | (worker_kind == 6 and (7 - worker_to_rank) * 4 or 0) |+|
+!var | worker_promotion_score | (worker_kind == 6 and worker_to_rank == 1 and 800 or 0) |+|
+!var | worker_king_score | (worker_kind == 1 and -18 or 0) |+|
+!var | worker_score | worker_capture_score + worker_center_score + worker_pawn_score + worker_promotion_score + worker_king_score + worker_code % 7 * 0.1 |+|
+!if | worker_score <= worker_best_score | chess_worker_advance |+|
+!var | worker_best_score | worker_score |+|
+!var | worker_best_code | worker_code |+|
+
+!label | chess_worker_advance |+|
+!if | worker_kind == 6 | chess_worker_next_pawn |+|
+!if | worker_kind == 5 | chess_worker_next_knight |+|
+!if | worker_kind == 1 | chess_worker_next_king |+|
+!jump | chess_worker_after_ray |+|
+!label | chess_worker_next_piece |+|
+!var | worker_piece | worker_piece + 1 |+|
+!jump | chess_worker_piece |+|
+!label | chess_worker_done |+|
+!return | worker_best_code |+|
+!label | chess_worker_end |+|
