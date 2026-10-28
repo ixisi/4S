@@ -1,0 +1,155 @@
+-- 1 king, 2 queen, 3 rook, 4 bishop, 5 knight, 6 pawn.
+-- Piece IDs 1..16 are white; 17..32 are black. Files 1..8 are a..h.
+!var | initial_kind | [
+    1,2,3,3,5,5,4,4,6,6,6,6,6,6,6,6,
+    1,2,3,3,5,5,4,4,6,6,6,6,6,6,6,6
+] |+|
+!var | initial_file | [
+    5,4,1,8,2,7,3,6,1,2,3,4,5,6,7,8,
+    5,4,1,8,2,7,3,6,1,2,3,4,5,6,7,8
+] |+|
+!var | initial_rank | [
+    1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,
+    8,8,8,8,8,8,8,8,7,7,7,7,7,7,7,7
+] |+|
+!var | side | [
+    1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1
+] |+|
+-- Original GLB node numbers. Each pawn has a body and a separate top.
+!var | node_body | [
+    2,4,40,41,44,45,48,49,6,8,10,12,14,16,18,20,
+    1,3,39,38,43,42,47,46,36,34,32,30,28,26,24,22
+] |+|
+!var | node_top | [
+    0,0,0,0,0,0,0,0,7,9,11,13,15,17,19,21,
+    0,0,0,0,0,0,0,0,37,35,33,31,29,27,25,23
+] |+|
+-- The supplied artwork starts three pawns advanced. New games reset them.
+!var | model_home_rank | [
+    1,1,1,1,1,1,1,1,2,2,3,4,2,2,2,2,
+    8,8,8,8,8,8,8,8,7,7,7,7,6,7,7,7
+] |+|
+!var | piece_label | [
+    "WHITE KING","WHITE QUEEN","WHITE ROOK A","WHITE ROOK H",
+    "WHITE KNIGHT B","WHITE KNIGHT G","WHITE BISHOP C","WHITE BISHOP F",
+    "WHITE PAWN A","WHITE PAWN B","WHITE PAWN C","WHITE PAWN D",
+    "WHITE PAWN E","WHITE PAWN F","WHITE PAWN G","WHITE PAWN H",
+    "BLACK KING","BLACK QUEEN","BLACK ROOK A","BLACK ROOK H",
+    "BLACK KNIGHT B","BLACK KNIGHT G","BLACK BISHOP C","BLACK BISHOP F",
+    "BLACK PAWN A","BLACK PAWN B","BLACK PAWN C","BLACK PAWN D",
+    "BLACK PAWN E","BLACK PAWN F","BLACK PAWN G","BLACK PAWN H"
+] |+|
+!var | piece_value | [0,9,5,3,3,1] |+|
+!var | file_letter | ["?","A","B","C","D","E","F","G","H"] |+|
+!var | kind | [] |+|
+!var | piece_file | [] |+|
+!var | piece_rank | [] |+|
+!var | piece_alive | [] |+|
+!var | piece_moved | [] |+|
+!var | promoted_name | [] |+|
+!for | initial_i from 1 to 32 { !var | promoted_name[initial_i] | "" |+| } |+|
+!var | board | [] |+|
+!var | node_piece | [] |+|
+!var | turn | 1 |+|
+-- 1: computer; 0: two local players; 2: dedicated secure WebSocket match.
+!var | mode | 1 |+|
+-- Hosting detects LAN automatically. The initial endpoint supplies its port.
+!var | net_server | "127.0.0.1:7779" |+|
+!var | net_auto_address | 1 |+|
+!var | net_lan | {ok:0,address:"",candidates:[],count:0,error:""} |+|
+!var | net_lan_index | 0 |+|
+-- Connection details must survive chess_net_open returning to the frame loop.
+!var | net_ip | "127.0.0.1" |+|
+!var | net_port | 7779 |+|
+-- Filled by Host, or pasted privately on Join. Never use a shared default key.
+!var | net_invite | "" |+|
+-- Joining is an explicit form; no socket opens until Connect is submitted.
+!var | join_visible | 0 |+|
+!var | join_invite | "" |+|
+!var | join_choice | 1 |+|
+!var | join_replace | 1 |+|
+!var | join_pointer_x | -1 |+|
+!var | join_pointer_y | -1 |+|
+!var | net_active | 0 |+|
+!var | net_role | 0 |+|
+!var | net_side | 1 |+|
+!var | net_peer | 0 |+|
+!var | net_ready | 0 |+|
+!var | net_pending | 0 |+|
+!var | net_waiting | 0 |+|
+!var | net_wait_choice | 1 |+|
+!var | net_wait_stage | "" |+|
+!var | net_epoch | 0 |+|
+!var | net_ply | 0 |+|
+!var | net_notice | "HOST AS WHITE OR JOIN AS BLACK" |+|
+!var | net_handshake_time | 0 |+|
+-- Move hints are independent for human turns and the computer's turn.
+!var | show_player_markers | 1 |+|
+!var | show_computer_markers | 1 |+|
+!var | menu_choice | 1 |+|
+!var | started | 0 |+|
+!var | menu_visible | 0 |+|
+!var | hud_height | 116 |+|
+!var | menu_width | math.min(560,screen.width-32) |+|
+!var | menu_height | 472 |+|
+!var | menu_left | math.floor((screen.width-menu_width)/2) |+|
+!var | menu_top | math.max(12,math.floor((screen.height-menu_height)/2)) |+|
+!var | menu_column | (menu_width-60)/2 |+|
+!var | menu_font_scale | (menu_width < 520 and 2 or 3) |+|
+!var | menu_pointer_x | -1 |+|
+!var | menu_pointer_y | -1 |+|
+!var | join_targets | [
+    {id:1,x:menu_left+24,y:menu_top+186,width:menu_width-148,height:44},
+    {id:2,x:menu_left+menu_width-112,y:menu_top+186,width:88,height:44},
+    {id:3,x:menu_left+24,y:menu_top+278,width:menu_column,height:48},
+    {id:4,x:menu_left+36+menu_column,y:menu_top+278,width:menu_column,height:48}
+] |+|
+-- Display order and hit regions are shared by drawing, keyboard, and mouse input.
+!var | menu_targets | [
+    {id:1,x:menu_left+24,y:menu_top+96,width:menu_column,height:74},
+    {id:2,x:menu_left+36+menu_column,y:menu_top+96,width:menu_column,height:74},
+    {id:5,x:menu_left+24,y:menu_top+182,width:menu_column,height:74},
+    {id:6,x:menu_left+36+menu_column,y:menu_top+182,width:menu_column,height:74},
+    {id:3,x:menu_left+24,y:menu_top+278,width:menu_column,height:44},
+    {id:4,x:menu_left+36+menu_column,y:menu_top+278,width:menu_column,height:44},
+    {id:9,x:menu_left+menu_width-104,y:menu_top+350,width:80,height:38}
+] |+|
+!var | wait_width | math.min(520,screen.width-32) |+|
+!var | wait_left | screen.width-wait_width-16 |+|
+!var | wait_top | 20 |+|
+!var | wait_copy | {x:wait_left+24,y:wait_top+262,width:(wait_width-60)/2,height:44} |+|
+!var | wait_cancel | {x:wait_left+36+(wait_width-60)/2,y:wait_top+262,width:(wait_width-60)/2,height:44} |+|
+!var | wait_network | {x:wait_left+wait_width-104,y:wait_top+162,width:80,height:32} |+|
+!var | paused | 0 |+|
+!var | pause_saved_mode | 0 |+|
+!var | game_over | 0 |+|
+!var | selected_piece | 0 |+|
+!var | highlighted_piece | 0 |+|
+!var | hint_count | 0 |+|
+!var | status | "PRESS ENTER TO PLAY" |+|
+!var | ep_file | 0 |+|
+!var | ep_rank | 0 |+|
+!var | ep_victim | 0 |+|
+!var | legal | 0 |+|
+!var | candidate_capture | 0 |+|
+!var | candidate_rook | 0 |+|
+!var | candidate_ep_square | 0 |+|
+!var | scan_found | 0 |+|
+!var | ai_pending | 0 |+|
+!var | ai_search_active | 0 |+|
+!var | ai_rejected | [] |+|
+!var | chess_ai_job | {} |+|
+!var | chess_hint_low_job | {} |+|
+!var | chess_hint_high_job | {} |+|
+!var | hint_phase | 0 |+|
+!var | hint_requested_piece | 0 |+|
+!var | hint_search_piece | 0 |+|
+!var | hint_search_turn | 0 |+|
+!var | worker_knight_df | [-2,-2,-1,-1,1,1,2,2] |+|
+!var | worker_knight_dr | [-1,1,-2,2,-2,2,-1,1] |+|
+!var | worker_king_df | [-1,-1,-1,0,0,1,1,1] |+|
+!var | worker_king_dr | [-1,0,1,-1,1,-1,0,1] |+|
+!var | worker_ray_df | [1,-1,0,0,1,1,-1,-1] |+|
+!var | worker_ray_dr | [0,0,1,-1,1,-1,1,-1] |+|
+!var | last_move | "" |+|
