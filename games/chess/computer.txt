@@ -1,0 +1,57 @@
+-- One nonblocking step per OBS frame. The isolated native worker searches a
+-- copied board; only the main game validates and applies the selected move.
+!fn | chess_computer_move | {
+    !if | mode != 1 or turn != -1 or game_over == 1 { !return |+| } |+|
+    !if | ai_search_active == 0 {
+        !var | ai_search_active | 1 |+|
+        !var | ai_rejected | [] |+|
+        !worker | chess_worker_search | chess_ai_job |+|
+        !return |+|
+    } |+|
+    !if | chess_ai_job.state == "running" { !return |+| } |+|
+    !if | chess_ai_job.state != "done" {
+        !var | ai_pending | 0 |+|
+        !var | ai_search_active | 0 |+|
+        !var | status | "COMPUTER SEARCH FAILED: " ..
+            (chess_ai_job.error or chess_ai_job.state) |+|
+        !chess_hud |+|
+        !worker | release | chess_ai_job |+|
+        !return |+|
+    } |+|
+    !var | ai_code | chess_ai_job.value |+|
+    !worker | release | chess_ai_job |+|
+    !if | ai_code < 1 {
+        !var | ai_pending | 0 |+|
+        !var | ai_search_active | 0 |+|
+        !var | king_to_test | 17 |+|
+        !chess_attacked | piece_file[king_to_test] | piece_rank[king_to_test] |
+            1 | -> | side_in_check |+|
+        !var | game_over | 1 |+|
+        !var | status | (side_in_check == 1 and "CHECKMATE - WHITE WINS" or
+            "STALEMATE - DRAW") |+|
+        !chess_hud |+|
+        !return |+|
+    } |+|
+    !var | best_piece | 17 + math.floor((ai_code - 1) / 64) |+|
+    !var | ai_square | (ai_code - 1) % 64 + 1 |+|
+    !var | best_file | (ai_square - 1) % 8 + 1 |+|
+    !var | best_rank | math.floor((ai_square - 1) / 8) + 1 |+|
+    !chess_validate | best_piece | best_file | best_rank |+|
+    !if | legal == 0 {
+        -- Pinned pieces, checks and castle-through-check are decided here.
+        -- Ask the worker for its next best candidate on a copied board.
+        !var | ai_rejected[ai_code] | 1 |+|
+        !worker | chess_worker_search | chess_ai_job |+|
+        !return |+|
+    } |+|
+    !var | ai_pending | 0 |+|
+    !var | ai_search_active | 0 |+|
+    !var | selected_piece | best_piece |+|
+    !var | status | piece_label[best_piece] .. " SELECTED BY COMPUTER" |+|
+    !chess_selection |+|
+    !chess_show_moves |+|
+    !chess_hud |+|
+    !for | announce_frame from 1 to 12 { !wait | frame |+| } |+|
+    !chess_validate | best_piece | best_file | best_rank |+|
+    !if | legal == 1 { !chess_commit | best_piece | best_file | best_rank |+| } |+|
+} |+|
