@@ -1,0 +1,104 @@
+-- Connection details stay internal. Only the private code is shared explicitly.
+!fn | chess_wait_draw | {
+    !canvas | use | name:ChessMenu |+|
+    !canvas | fill | red:0,green:0,blue:0,opacity:0 |+|
+    !chess_ui_panel | wait_left | wait_top | wait_width | 346 | 17 | 27 | 42 | 12 |+|
+    !canvas | circle | x:wait_left+26,y:wait_top+29,radius:4 | red:243,green:194,blue:107 |+|
+    !chess_ui_text | net_wait_stage | wait_left+40 | wait_top+20 | 3 | 249 | 218 | 158 |+|
+    !chess_ui_text | (net_role == 1 and "WHITE / HOST / PIECES LOCKED" or "BLACK / GUEST / PIECES LOCKED") |
+        wait_left+24 | wait_top+59 | 2 | 156 | 185 | 212 |+|
+    !chess_ui_text | (net_role == 1 and "SHARE YOUR PRIVATE CONNECTION CODE." or "VERIFYING THE PRIVATE CONNECTION CODE.") |
+        wait_left+24 | wait_top+105 | 2 | 235 | 242 | 251 |+|
+    !chess_ui_text | "CONNECTION DETAILS ARE AUTOMATIC." |
+        wait_left+24 | wait_top+136 | 2 | 164 | 185 | 207 |+|
+    !if | net_role == 1 {
+        !if | net_lan_index > 0 and net_lan.count > 1 {
+            !chess_ui_text | string.sub(string.upper(net_lan.candidates[net_lan_index].name),1,18) .. " / " .. net_lan_index .. " OF " .. net_lan.count |
+                wait_left+24 | wait_top+173 | 2 | 164 | 185 | 207 |+|
+            !chess_ui_panel | wait_network.x | wait_network.y | wait_network.width | wait_network.height |
+                (net_wait_choice == 3 and 70 or 38) | 58 | 78 | 5 |+|
+            !chess_ui_text | "NEXT" | wait_network.x+9 | wait_network.y+9 | 2 | 223 | 235 | 247 |+|
+        } |+|
+        !chess_ui_text | "PRIVATE CODE READY / HIDDEN ON STREAM" |
+            wait_left+24 | wait_top+208 | 2 | 151 | 211 | 189 |+|
+        !chess_ui_button | wait_copy | "COPY INVITE" | "" | (net_wait_choice == 1 and 1 or 0) |+|
+    } |+|
+    !else {
+        !chess_ui_text | "STARTS WHEN BOTH PLAYERS ARE READY." |
+            wait_left+24 | wait_top+173 | 2 | 164 | 185 | 207 |+|
+        !chess_ui_text | "YOU PLAY BLACK. WHITE MOVES FIRST." |
+            wait_left+24 | wait_top+208 | 2 | 151 | 211 | 189 |+|
+    } |+|
+    !chess_ui_text | string.sub(net_notice,1,39) | wait_left+24 | wait_top+236 | 2 | 243 | 199 | 128 |+|
+    !chess_ui_button | wait_cancel | "CANCEL" | "" | (net_wait_choice == 2 and 1 or 0) |+|
+    !chess_ui_text | (net_role == 1 and "C COPY INVITE   N NETWORK   TAB CANCEL" or "TAB CANCEL / WAIT FOR HOST TO START") |
+        wait_left+24 | wait_top+322 | 2 | 142 | 166 | 191 |+|
+    !canvas | update |+|
+} |+|
+
+!fn | chess_wait_show | {
+    !var | net_waiting | 1 |+|
+    !var | net_wait_choice | (net_role == 1 and 1 or 2) |+|
+    !var | net_wait_stage | (net_role == 1 and "WAITING FOR OPPONENT" or "CONNECTING TO HOST") |+|
+    !var | started | 0 |+|
+    !var | menu_visible | 0 |+|
+    !var | paused | 0 |+|
+    !var | mouse_drag | 0 |+|
+    !world3d | blur | amount:0 |+|
+    !source | ChessHUD |+| !hide |+|
+    !source | ChessMenu |+| !show |+| !source |+|
+    !chess_wait_draw |+|
+} |+|
+
+-- The listener and TLS credentials stay intact when changing shared network.
+!fn | chess_wait_next_network | {
+    !if | net_role != 1 or net_lan_index == 0 or net_lan.count < 2 { !return |+| } |+|
+    !var | net_lan_index | (net_lan_index % net_lan.count)+1 |+|
+    !var | net_ip | net_lan.candidates[net_lan_index].address |+|
+    !var | net_server | net_ip .. ":" .. net_port |+|
+    !connection | invite | name:chess,address:net_ip,into:net_invite |+|
+    !var | net_notice | "NETWORK CHANGED / COPY INVITE AGAIN" |+|
+    !chess_wait_draw |+|
+} |+|
+
+!fn | chess_wait_input | {
+    !var | next_wait_stage | (net_role == 1 and (net_peer > 0 and "PREPARING MATCH" or "WAITING FOR OPPONENT") or "CONNECTING TO HOST") |+|
+    !if | net_role == 2 {
+        !connection | status | name:chess,into:net_connection |+|
+        !var | next_wait_stage | (net_connection.phase == "tcp" and "CONTACTING HOST" or
+            net_connection.phase == "tls" and "SECURING CONNECTION" or
+            net_connection.phase == "websocket" and "OPENING GAME CHANNEL" or "CHECKING INVITATION") |+|
+    } |+|
+    !if | net_role == 1 and net_peer == 0 {
+        !connection | status | name:chess,into:net_connection |+|
+        !if | net_connection.connections > 0 {
+            !var | next_wait_stage | (net_connection.peers[1].phase == "invitation" and "CHECKING INVITATION" or
+                net_connection.peers[1].phase == "websocket" and "OPENING GAME CHANNEL" or "SECURING CONNECTION") |+|
+        } |+|
+    } |+|
+    !if | next_wait_stage != net_wait_stage { !var | net_wait_stage | next_wait_stage |+| !chess_wait_draw |+| } |+|
+    !if | keys.TAB_pressed == 1 or keys.ESCAPE_pressed == 1 {
+        !chess_net_lost | "ONLINE CONNECTION CANCELLED" |+| !return |+|
+    } |+|
+    !if | keys.LEFT_pressed == 1 or keys.RIGHT_pressed == 1 or keys.UP_pressed == 1 or keys.DOWN_pressed == 1 {
+        !var | max_choice | (net_role == 1 and net_lan_index > 0 and net_lan.count > 1 and 3 or 2) |+|
+        !var | net_wait_choice | net_wait_choice + ((keys.RIGHT_pressed == 1 or keys.DOWN_pressed == 1) and 1 or -1) |+|
+        !if | net_wait_choice > max_choice { !var | net_wait_choice | (net_role == 1 and 1 or 2) |+| } |+|
+        !if | net_wait_choice < (net_role == 1 and 1 or 2) { !var | net_wait_choice | max_choice |+| } |+|
+        !chess_wait_draw |+|
+    } |+|
+    !if | keys.mouse_inside == 1 and keys.MOUSE_LEFT_pressed == 1 {
+        !if | keys.x >= wait_cancel.x and keys.x < wait_cancel.x+wait_cancel.width and keys.y >= wait_cancel.y and keys.y < wait_cancel.y+wait_cancel.height {
+            !chess_net_lost | "ONLINE CONNECTION CANCELLED" |+| !return |+|
+        } |+|
+        !if | net_role == 1 and keys.x >= wait_copy.x and keys.x < wait_copy.x+wait_copy.width and keys.y >= wait_copy.y and keys.y < wait_copy.y+wait_copy.height { !chess_net_copy_invite |+| } |+|
+        !if | keys.x >= wait_network.x and keys.x < wait_network.x+wait_network.width and keys.y >= wait_network.y and keys.y < wait_network.y+wait_network.height { !chess_wait_next_network |+| } |+|
+    } |+|
+    !if | net_role == 1 and keys.C_pressed == 1 { !chess_net_copy_invite |+| } |+|
+    !if | keys.N_pressed == 1 { !chess_wait_next_network |+| } |+|
+    !if | keys.ENTER_pressed == 1 {
+        !if | net_wait_choice == 1 and net_role == 1 { !chess_net_copy_invite |+| } |+|
+        !if | net_wait_choice == 2 { !chess_net_lost | "ONLINE CONNECTION CANCELLED" |+| } |+|
+        !if | net_wait_choice == 3 { !chess_wait_next_network |+| } |+|
+    } |+|
+} |+|
