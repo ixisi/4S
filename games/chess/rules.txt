@@ -1,0 +1,176 @@
+-- Board rules are independent of the imported 3D artwork.
+!fn | chess_path_clear | from_f, from_r, to_f, to_r | {
+    !var | delta_f | to_f - from_f |+|
+    !var | delta_r | to_r - from_r |+|
+    !var | step_f | (delta_f > 0 and 1 or delta_f < 0 and -1 or 0) |+|
+    !var | step_r | (delta_r > 0 and 1 or delta_r < 0 and -1 or 0) |+|
+    !var | steps | math.max(math.abs(delta_f),math.abs(delta_r)) |+|
+    !var | open_path | 1 |+|
+    !for | path_i from 1 to 7 {
+        !if | path_i < steps {
+            !var | test_f | from_f + path_i * step_f |+|
+            !var | test_r | from_r + path_i * step_r |+|
+            !var | test_sq | (test_r - 1) * 8 + test_f |+|
+            !if | board[test_sq] != 0 { !var | open_path | 0 |+| } |+|
+        } |+|
+    } |+|
+    !return | open_path |+|
+} |+|
+
+!fn | chess_attacked | target_f, target_r, attacking_side | {
+    !var | threatened | 0 |+|
+    !for | attacker from 1 to 32 {
+        !if | threatened == 0 and piece_alive[attacker] == 1 and side[attacker] == attacking_side {
+            !var | df | target_f - piece_file[attacker] |+|
+            !var | dr | target_r - piece_rank[attacker] |+|
+            !var | adf | math.abs(df) |+|
+            !var | adr | math.abs(dr) |+|
+            !var | attack_kind | kind[attacker] |+|
+            !if | attack_kind == 6 and adf == 1 and dr == attacking_side {
+                !var | threatened | 1 |+|
+            } |+|
+            !if | attack_kind == 5 and ((adf == 1 and adr == 2) or (adf == 2 and adr == 1)) {
+                !var | threatened | 1 |+|
+            } |+|
+            !if | attack_kind == 1 and adf <= 1 and adr <= 1 {
+                !var | threatened | 1 |+|
+            } |+|
+            !if | threatened == 0 and
+                ((attack_kind == 3 and (df == 0 or dr == 0) and adf + adr > 0) or
+                 (attack_kind == 4 and adf == adr and adf > 0) or
+                 (attack_kind == 2 and
+                    ((df == 0 or dr == 0) or (adf == adr)) and adf + adr > 0)) {
+                !chess_path_clear | piece_file[attacker] | piece_rank[attacker] |
+                    target_f | target_r | -> | line_open |+|
+                !if | line_open == 1 { !var | threatened | 1 |+| } |+|
+            } |+|
+        } |+|
+    } |+|
+    !return | threatened |+|
+} |+|
+
+-- Sets legal and candidate capture/castle metadata for the requested move.
+-- A temporary board move is undone before returning, even for en passant.
+!fn | chess_validate | moving, to_f, to_r | {
+    !var | legal | 0 |+|
+    !var | candidate_capture | 0 |+|
+    !var | candidate_rook | 0 |+|
+    !var | candidate_ep_square | 0 |+|
+    !if | moving < 1 or moving > 32 or to_f < 1 or to_f > 8 or to_r < 1 or to_r > 8 {
+        !return |+|
+    } |+|
+    !if | piece_alive[moving] == 0 or side[moving] != turn { !return |+| } |+|
+    !var | from_f | piece_file[moving] |+|
+    !var | from_r | piece_rank[moving] |+|
+    !var | df | to_f - from_f |+|
+    !var | dr | to_r - from_r |+|
+    !var | adf | math.abs(df) |+|
+    !var | adr | math.abs(dr) |+|
+    !if | adf + adr == 0 { !return |+| } |+|
+    !var | from_sq | (from_r - 1) * 8 + from_f |+|
+    !var | to_sq | (to_r - 1) * 8 + to_f |+|
+    !var | target_id | board[to_sq] |+|
+    !if | target_id > 0 and side[target_id] == turn { !return |+| } |+|
+    !if | target_id > 0 and kind[target_id] == 1 { !return |+| } |+|
+    !var | shape_ok | 0 |+|
+    !var | move_kind | kind[moving] |+|
+
+    !if | move_kind == 6 {
+        !if | df == 0 and dr == turn and target_id == 0 {
+            !var | shape_ok | 1 |+|
+        } |+|
+        !if | df == 0 and dr == 2 * turn and target_id == 0 and piece_moved[moving] == 0 and
+            ((turn == 1 and from_r == 2) or (turn == -1 and from_r == 7)) {
+            !var | middle_sq | (from_r + turn - 1) * 8 + from_f |+|
+            !if | board[middle_sq] == 0 { !var | shape_ok | 1 |+| } |+|
+        } |+|
+        !if | adf == 1 and dr == turn and target_id > 0 {
+            !var | shape_ok | 1 |+|
+        } |+|
+        !if | adf == 1 and dr == turn and target_id == 0 and
+            to_f == ep_file and to_r == ep_rank and ep_victim > 0 {
+            !var | shape_ok | 1 |+|
+            !var | candidate_capture | ep_victim |+|
+            !var | candidate_ep_square | (from_r - 1) * 8 + to_f |+|
+        } |+|
+    } |+|
+    !if | move_kind == 5 and ((adf == 1 and adr == 2) or (adf == 2 and adr == 1)) {
+        !var | shape_ok | 1 |+|
+    } |+|
+    !if | move_kind == 3 and (df == 0 or dr == 0) {
+        !chess_path_clear | from_f | from_r | to_f | to_r | -> | shape_ok |+|
+    } |+|
+    !if | move_kind == 4 and adf == adr {
+        !chess_path_clear | from_f | from_r | to_f | to_r | -> | shape_ok |+|
+    } |+|
+    !if | move_kind == 2 and ((df == 0 or dr == 0) or (adf == adr)) {
+        !chess_path_clear | from_f | from_r | to_f | to_r | -> | shape_ok |+|
+    } |+|
+    !if | move_kind == 1 and adf <= 1 and adr <= 1 {
+        !var | shape_ok | 1 |+|
+    } |+|
+    !if | move_kind == 1 and adf == 2 and dr == 0 and piece_moved[moving] == 0 {
+        !var | rook_id | (turn == 1 and (df > 0 and 4 or 3) or (df > 0 and 20 or 19)) |+|
+        !if | piece_alive[rook_id] == 1 and piece_moved[rook_id] == 0 {
+            !chess_path_clear | from_f | from_r | piece_file[rook_id] | from_r | -> | shape_ok |+|
+            !if | shape_ok == 1 {
+                !chess_attacked | from_f | from_r | -turn | -> | start_threat |+|
+                !chess_attacked | from_f + (df > 0 and 1 or -1) | from_r | -turn |
+                    -> | through_threat |+|
+                !if | start_threat == 1 or through_threat == 1 {
+                    !var | shape_ok | 0 |+|
+                } |+|
+                !else { !var | candidate_rook | rook_id |+| } |+|
+            } |+|
+        } |+|
+    } |+|
+    !if | shape_ok == 0 { !return |+| } |+|
+    !if | candidate_capture == 0 { !var | candidate_capture | target_id |+| } |+|
+
+    !var | captured | candidate_capture |+|
+    !var | ep_square | candidate_ep_square |+|
+    !var | old_file | piece_file[moving] |+|
+    !var | old_rank | piece_rank[moving] |+|
+    !var | board_to_before | board[to_sq] |+|
+    !var | board_ep_before | 0 |+|
+    !if | ep_square > 0 {
+        !var | board_ep_before | board[ep_square] |+|
+        !var | board[ep_square] | 0 |+|
+    } |+|
+    !if | captured > 0 { !var | piece_alive[captured] | 0 |+| } |+|
+    !var | board[from_sq] | 0 |+|
+    !var | board[to_sq] | moving |+|
+    !var | piece_file[moving] | to_f |+|
+    !var | piece_rank[moving] | to_r |+|
+    !var | king_id | (turn == 1 and 1 or 17) |+|
+    !chess_attacked | piece_file[king_id] | piece_rank[king_id] | -turn |
+        -> | king_threat |+|
+    !var | piece_file[moving] | old_file |+|
+    !var | piece_rank[moving] | old_rank |+|
+    !var | board[from_sq] | moving |+|
+    !var | board[to_sq] | board_to_before |+|
+    !if | ep_square > 0 { !var | board[ep_square] | board_ep_before |+| } |+|
+    !if | captured > 0 { !var | piece_alive[captured] | 1 |+| } |+|
+    !if | king_threat == 0 { !var | legal | 1 |+| } |+|
+} |+|
+
+!fn | chess_find_any_move | {
+    !var | scan_found | 0 |+|
+    -- Pawns are checked first; they usually provide a legal reply quickly.
+    -- Continue through every piece when looking for mate or stalemate.
+    !for | scan_index from 1 to 16 {
+        !var | test_piece | (turn == 1 and 0 or 16) +
+            ((scan_index + 7) % 16) + 1 |+|
+        !if | scan_found == 0 and piece_alive[test_piece] == 1 and side[test_piece] == turn {
+            !for | test_square from 1 to 64 {
+                !if | test_square % 8 == 1 { !wait | frame |+| } |+|
+                !if | scan_found == 0 {
+                    !var | test_file | ((test_square - 1) % 8) + 1 |+|
+                    !var | test_rank | math.floor((test_square - 1) / 8) + 1 |+|
+                    !chess_validate | test_piece | test_file | test_rank |+|
+                    !if | legal == 1 { !var | scan_found | 1 |+| } |+|
+                } |+|
+            } |+|
+        } |+|
+    } |+|
+} |+|
