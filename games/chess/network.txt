@@ -1,0 +1,300 @@
+-- One host (white), one guest (black). Only the host approves moves.
+-- Small, anchored text packets avoid accepting arbitrary board tables/code.
+-- Epoch + ply reject old sessions, stale clicks, duplicate moves and wrong turns.
+!fn | chess_net_close | {
+    !if | net_active == 1 { !connection | close | name:chess |+| } |+|
+    !var | net_active | 0 |+|
+    !var | net_ready | 0 |+|
+    !var | net_waiting | 0 |+|
+    !var | net_pending | 0 |+|
+    !var | net_peer | 0 |+|
+    !var | net_invite | "" |+|
+} |+|
+
+!fn | chess_net_copy_invite | {
+    !connection | invite | name:chess,address:net_ip,into:net_invite |+|
+    !clipboard | copy | text:net_invite,into:invite_copy |+|
+    !var | net_notice | (invite_copy.ok == 1 and
+        "INVITE COPIED - SHARE PRIVATELY" or
+        "HOSTING - CLIPBOARD UNAVAILABLE; RETRIEVE THE INVITE IN SCRIPT") |+|
+    !if | net_waiting == 1 { !chess_wait_draw |+| } |+|
+    !else { !chess_menu_draw |+| } |+|
+} |+|
+
+!fn | chess_net_lost | message | {
+    !log | message |+|
+    !chess_net_close |+|
+    !var | hint_requested_piece | 0 |+|
+    !var | selected_piece | 0 |+|
+    !chess_selection |+|
+    !chess_hide_moves |+|
+    !var | started | 0 |+|
+    !var | paused | 0 |+|
+    !var | game_over | 0 |+|
+    !var | net_notice | message |+|
+    !if | net_role == 2 and string.find(string.lower(message),"connection refused",1,true) != nil {
+        !var | net_notice | "JOIN REFUSED: HOST MUST BE ONLINE. ASK FOR A NEW CODE." |+|
+    } |+|
+    !if | net_role == 2 and string.find(message,"before reaching host",1,true) != nil {
+        !var | net_notice | "HOST NOT REACHED. CHECK OBS FIREWALL / HOST NETWORK." |+|
+    } |+|
+    !var | status | net_notice |+|
+    !chess_menu_show |+|
+    !chess_hud |+|
+} |+|
+
+!fn | chess_net_send | message | {
+    !connection | send | name:chess,peer:net_peer,text:message,into:net_sent |+|
+    !if | net_sent.ok == 0 { !chess_net_lost | net_sent.error |+| } |+|
+} |+|
+
+!fn | chess_net_begin | {
+    !worker | release | chess_hint_low_job |+|
+    !worker | release | chess_hint_high_job |+|
+    !var | hint_phase | 0 |+|
+    !var | mode | 2 |+|
+    !var | net_pending | 0 |+|
+    !var | net_ply | 0 |+|
+    !chess_new_game |+|
+    !var | net_ready | 1 |+|
+    !var | net_notice | (net_side == 1 and "ONLINE - YOU ARE WHITE" or "ONLINE - YOU ARE BLACK") |+|
+    !chess_game_show |+|
+} |+|
+
+!fn | chess_net_restart | {
+    !if | net_role != 1 or net_ready == 0 { !return |+| } |+|
+    !var | net_epoch | net_epoch + 1 |+|
+    !chess_net_send | "4C1 START (net_epoch)" |+|
+    !if | net_active == 1 { !chess_net_begin |+| } |+|
+} |+|
+
+!fn | chess_net_open | hosting | {
+    !if | hosting == 0 {
+        !var | clean_invite | string.gsub(net_invite,"%s","") |+|
+        !connection | decode | invite:clean_invite,into:connection_details |+|
+        !if | connection_details.ok == 0 {
+            !var | net_notice | "PASTE THE HOST'S COMPLETE PRIVATE CONNECTION CODE" |+|
+            !chess_menu_draw |+|
+            !return |+|
+        } |+|
+    } |+|
+    !if | hosting == 1 {
+    -- Backend host configuration only; no address entry appears in the GUI.
+    !var | net_ip | string.match(net_server,"^([^:]+):%d+$") or "" |+|
+    !var | net_port | tonumber(string.match(net_server,":(%d+)$")) or 0 |+|
+    !var | octet_a | tonumber(string.match(net_ip,"^(%d+)%.%d+%.%d+%.%d+$")) or -1 |+|
+    !var | octet_b | tonumber(string.match(net_ip,"^%d+%.(%d+)%.%d+%.%d+$")) or -1 |+|
+    !var | octet_c | tonumber(string.match(net_ip,"^%d+%.%d+%.(%d+)%.%d+$")) or -1 |+|
+    !var | octet_d | tonumber(string.match(net_ip,"^%d+%.%d+%.%d+%.(%d+)$")) or -1 |+|
+    !if | net_port < 1 or net_port > 65535 or
+        (net_auto_address == 0 and net_ip != "localhost" and (octet_a < 0 or octet_a > 255 or
+        octet_b < 0 or octet_b > 255 or octet_c < 0 or octet_c > 255 or
+        octet_d < 0 or octet_d > 255)) {
+        !var | net_notice | "INVALID HOST NETWORK CONFIGURATION" |+|
+        !chess_menu_draw |+|
+        !return |+|
+    } |+|
+        !var | net_lan_index | 0 |+|
+        !if | net_auto_address == 1 {
+            !connection | addresses | into:net_lan |+|
+            !if | net_lan.ok == 0 {
+                !var | net_notice | "NO ACTIVE NETWORK FOUND. CONNECT WI-FI OR ETHERNET AND RETRY." |+|
+                !chess_menu_draw |+|
+                !return |+|
+            } |+|
+            !var | net_lan_index | 1 |+|
+            !var | net_ip | net_lan.address |+|
+            !var | net_server | net_ip .. ":" .. net_port |+|
+        } |+|
+    } |+|
+    !var | join_visible | 0 |+|
+    !chess_net_close |+|
+    !if | hosting == 0 { !var | net_invite | clean_invite |+| } |+|
+    !worker | release | chess_ai_job |+|
+    !var | ai_pending | 0 |+|
+    !var | hint_requested_piece | 0 |+|
+    !var | selected_piece | 0 |+|
+    !chess_selection |+|
+    !chess_hide_moves |+|
+    !var | mode | 2 |+|
+    !chess_new_game |+|
+    !var | started | 0 |+|
+    !var | paused | 0 |+|
+    !var | game_over | 0 |+|
+    !var | net_role | (hosting == 1 and 1 or 2) |+|
+    !var | net_side | (hosting == 1 and 1 or -1) |+|
+    !var | net_peer | (hosting == 1 and 0 or 1) |+|
+    !var | net_handshake_time | 0 |+|
+    !var | net_active | 1 |+|
+    !if | hosting == 1 {
+        !connection | host | name:chess,address:"0.0.0.0",port:net_port,security:tls,
+            message_limit:256,buffer_limit:16384,max_clients:1,max_peers:4,max_pending:3,
+            event_limit:128,queue_limit:131072,connection_rate:8,address_rate:2,
+            message_rate:12,byte_rate:65536,handshake_timeout:5000,read_timeout:5000 |+|
+        !var | net_notice | "HOSTING / WAITING FOR OPPONENT" |+|
+    } |+|
+    !else {
+        !var | net_epoch | 0 |+|
+        !connection | join | name:chess,security:tls,invite:net_invite,
+            message_limit:256,buffer_limit:16384,event_limit:128,queue_limit:131072,
+            message_rate:12,byte_rate:65536,handshake_timeout:5000,read_timeout:5000 |+|
+        !var | net_notice | "CONNECTING SECURELY TO HOST" |+|
+    } |+|
+    !connection | status | name:chess,into:net_connection |+|
+    !if | net_connection.state == "error" {
+        !chess_net_lost | net_connection.error |+|
+        !return |+|
+    } |+|
+    !var | status | "WAITING FOR OPPONENT - PIECES LOCKED" |+|
+    !chess_wait_show |+|
+    !if | hosting == 1 { !chess_net_copy_invite |+| } |+|
+} |+|
+
+!fn | chess_net_select | piece | {
+    !if | mode != 2 or net_ready == 0 or net_pending == 1 { !return |+| } |+|
+    !chess_net_send | "4C1 SELECT (net_epoch) (net_ply) (piece)" |+|
+} |+|
+
+!fn | chess_net_reject | {
+    !chess_net_send | "4C1 REJECT (net_epoch) (net_ply)" |+|
+} |+|
+
+!fn | chess_net_accept | piece, file, rank, requested_side | {
+    !if | net_ready == 0 or game_over == 1 or turn != requested_side or
+        piece < 1 or piece > 32 or file < 1 or file > 8 or rank < 1 or rank > 8 {
+        !if | requested_side == -1 { !chess_net_reject |+| } |+|
+        !return |+|
+    } |+|
+    !if | piece_alive[piece] != 1 or side[piece] != requested_side {
+        !if | requested_side == -1 { !chess_net_reject |+| } |+|
+        !return |+|
+    } |+|
+    !chess_validate | piece | file | rank |+|
+    !if | legal == 0 {
+        !if | requested_side == -1 { !chess_net_reject |+| } |+|
+        !var | status | "ILLEGAL MOVE" |+|
+        !chess_hud |+|
+        !return |+|
+    } |+|
+    !var | net_ply | net_ply + 1 |+|
+    !chess_net_send | "4C1 MOVE (net_epoch) (net_ply) (piece) (file) (rank)" |+|
+    !if | net_active == 1 { !chess_commit | piece | file | rank |+| } |+|
+} |+|
+
+!fn | chess_net_submit | piece, file, rank | {
+    !if | net_ready == 0 or net_pending == 1 or turn != net_side { !return |+| } |+|
+    !if | net_role == 1 { !chess_net_accept | piece | file | rank | 1 |+| } |+|
+    !else {
+        !chess_net_send | "4C1 REQUEST (net_epoch) (net_ply) (piece) (file) (rank)" |+|
+        !if | net_active == 1 {
+            !var | net_pending | 1 |+|
+            !var | status | "WAITING FOR HOST TO APPROVE MOVE" |+|
+            !chess_hud |+|
+        } |+|
+    } |+|
+} |+|
+
+!fn | chess_net_packet | {
+    !var | wire | net_packet.text |+|
+    !if | net_role == 1 and wire == "4C1 HELLO" and net_ready == 0 {
+        !var | net_epoch | net_epoch + 1 |+|
+        !chess_net_send | "4C1 START (net_epoch)" |+|
+        !if | net_active == 1 { !chess_net_begin |+| } |+|
+        !return |+|
+    } |+|
+    !var | start_epoch | tonumber(string.match(wire,"^4C1 START (%d+)$")) or 0 |+|
+    !if | start_epoch > 9007199254740991 { !chess_net_lost | "INVALID MATCH NUMBER" |+| !return |+| } |+|
+    !if | net_role == 2 and start_epoch > net_epoch {
+        !var | net_epoch | start_epoch |+|
+        !chess_net_begin |+|
+        !return |+|
+    } |+|
+    !if | net_ready == 0 { !return |+| } |+|
+    !var | action | string.match(wire,"^4C1 (%u+) %d+ %d+") or "" |+|
+    !var | epoch | tonumber(string.match(wire,"^4C1 %u+ (%d+) %d+")) or -1 |+|
+    !var | ply | tonumber(string.match(wire,"^4C1 %u+ %d+ (%d+)")) or -1 |+|
+    !if | epoch > 9007199254740991 or ply > 9007199254740991 {
+        !chess_net_lost | "INVALID MOVE NUMBER" |+|
+        !return |+|
+    } |+|
+    !if | epoch != net_epoch { !return |+| } |+|
+    !if | action == "REJECT" and net_role == 2 and
+        wire == "4C1 REJECT " .. epoch .. " " .. ply {
+        !var | net_pending | 0 |+|
+        !var | status | "HOST REJECTED MOVE - SELECT A LEGAL DESTINATION" |+|
+        !chess_hud |+|
+        !return |+|
+    } |+|
+    !var | selected | tonumber(string.match(wire,"^4C1 SELECT %d+ %d+ (%d+)$")) or 0 |+|
+    !if | action == "SELECT" and ply == net_ply and selected >= 1 and selected <= 32 and
+        turn == -net_side and side[selected] == turn and piece_alive[selected] == 1 {
+        !if | selected_piece == selected { !return |+| } |+|
+        !var | selected_piece | selected |+|
+        !chess_selection |+|
+        !chess_request_moves |+|
+        !chess_hud |+|
+        !return |+|
+    } |+|
+    !var | move_piece | tonumber(string.match(wire,"^4C1 %u+ %d+ %d+ (%d+) %d+ %d+$")) or 0 |+|
+    !var | move_file | tonumber(string.match(wire,"^4C1 %u+ %d+ %d+ %d+ (%d+) %d+$")) or 0 |+|
+    !var | move_rank | tonumber(string.match(wire,"^4C1 %u+ %d+ %d+ %d+ %d+ (%d+)$")) or 0 |+|
+    !if | net_role == 1 and action == "REQUEST" {
+        !if | ply != net_ply { !chess_net_reject |+| !return |+| } |+|
+        !chess_net_accept | move_piece | move_file | move_rank | -1 |+|
+        !return |+|
+    } |+|
+    !if | net_role == 2 and action == "MOVE" and ply > net_ply {
+        !if | ply != net_ply + 1 or move_piece < 1 or move_piece > 32 or
+            move_file < 1 or move_file > 8 or move_rank < 1 or move_rank > 8 {
+            !chess_net_lost | "OUT OF SYNC - JOIN A NEW MATCH" |+|
+            !return |+|
+        } |+|
+        !if | piece_alive[move_piece] != 1 or side[move_piece] != turn {
+            !chess_net_lost | "OUT OF SYNC - INVALID HOST MOVE" |+|
+            !return |+|
+        } |+|
+        !chess_validate | move_piece | move_file | move_rank |+|
+        !if | legal == 0 {
+            !chess_net_lost | "OUT OF SYNC - HOST MOVE IS NOT LEGAL" |+|
+            !return |+|
+        } |+|
+        !var | net_ply | ply |+|
+        !var | net_pending | 0 |+|
+        !chess_commit | move_piece | move_file | move_rank |+|
+    } |+|
+} |+|
+
+!fn | chess_net_poll | {
+    !if | net_active == 0 { !return |+| } |+|
+    !for | net_event_index from 1 to 8 {
+        !if | net_active == 1 {
+            !connection | receive | name:chess,into:net_packet |+|
+            !if | net_packet.event == "join" {
+                !if | net_role == 1 {
+                    !if | net_peer == 0 {
+                        !var | net_peer | net_packet.peer |+|
+                        !var | net_handshake_time | 0 |+|
+                    } |+|
+                    !else { !connection | close | name:chess,peer:net_packet.peer |+| } |+|
+                } |+|
+                !else { !chess_net_send | "4C1 HELLO" |+| } |+|
+            } |+|
+            !if | net_packet.peer == net_peer {
+                !if | net_packet.event == "message" { !chess_net_packet |+| } |+|
+                !if | net_packet.event == "leave" {
+                    !chess_net_lost | "OPPONENT DISCONNECTED - HOST OR JOIN AGAIN" |+|
+                } |+|
+            } |+|
+            !if | net_packet.event == "error" and
+                (net_packet.peer == net_peer or net_packet.peer == 0) {
+                !chess_net_lost | net_packet.text |+|
+            } |+|
+        } |+|
+    } |+|
+    !if | net_active == 1 and net_ready == 0 and net_peer > 0 {
+        !var | net_handshake_time | net_handshake_time + tick |+|
+        !if | net_handshake_time > 15 {
+            !chess_net_lost | "CHESS HANDSHAKE TIMED OUT - CHECK BOTH GAME VERSIONS" |+|
+        } |+|
+    } |+|
+} |+|
