@@ -1,0 +1,70 @@
+-- Search a copied board on a native worker. Each job covers 32 squares so
+-- its exact integer bitmask fits in the worker's numeric result.
+-- The main game still performs king-safety validation before drawing a marker.
+!jump | chess_hint_worker_end |+|
+!label | <chess_hint_worker_search> |+|
+!var | hint_worker_mask | 0 |+|
+!var | hint_worker_index | 0 |+|
+!var | hint_worker_piece | hint_worker_selected |+|
+!var | hint_worker_kind | kind[hint_worker_piece] |+|
+!var | hint_worker_from_f | piece_file[hint_worker_piece] |+|
+!var | hint_worker_from_r | piece_rank[hint_worker_piece] |+|
+!label | chess_hint_worker_next |+|
+!if | hint_worker_index >= 32 | chess_hint_worker_done |+|
+!var | hint_worker_square | hint_worker_first + hint_worker_index |+|
+!var | hint_worker_to_f | (hint_worker_square - 1) % 8 + 1 |+|
+!var | hint_worker_to_r | math.floor((hint_worker_square - 1) / 8) + 1 |+|
+!var | hint_worker_df | hint_worker_to_f - hint_worker_from_f |+|
+!var | hint_worker_dr | hint_worker_to_r - hint_worker_from_r |+|
+!var | hint_worker_adf | math.abs(hint_worker_df) |+|
+!var | hint_worker_adr | math.abs(hint_worker_dr) |+|
+!if | hint_worker_adf + hint_worker_adr == 0 | chess_hint_worker_advance |+|
+!var | hint_worker_target | board[hint_worker_square] |+|
+!if | hint_worker_target > 0 and side[hint_worker_target] == turn | chess_hint_worker_advance |+|
+!if | hint_worker_target > 0 and kind[hint_worker_target] == 1 | chess_hint_worker_advance |+|
+!if | hint_worker_kind == 6 | chess_hint_worker_pawn |+|
+!if | hint_worker_kind == 5 | chess_hint_worker_knight |+|
+!if | hint_worker_kind == 1 | chess_hint_worker_king |+|
+!if | hint_worker_kind == 3 and hint_worker_df != 0 and hint_worker_dr != 0 | chess_hint_worker_advance |+|
+!if | hint_worker_kind == 4 and hint_worker_adf != hint_worker_adr | chess_hint_worker_advance |+|
+!if | hint_worker_kind == 2 and hint_worker_df != 0 and hint_worker_dr != 0 and hint_worker_adf != hint_worker_adr | chess_hint_worker_advance |+|
+!var | hint_worker_step_f | (hint_worker_df > 0 and 1 or hint_worker_df < 0 and -1 or 0) |+|
+!var | hint_worker_step_r | (hint_worker_dr > 0 and 1 or hint_worker_dr < 0 and -1 or 0) |+|
+!var | hint_worker_steps | math.max(hint_worker_adf,hint_worker_adr) |+|
+!var | hint_worker_path_i | 1 |+|
+!label | chess_hint_worker_path |+|
+!if | hint_worker_path_i >= hint_worker_steps | chess_hint_worker_accept |+|
+!var | hint_worker_path_sq | (hint_worker_from_r + hint_worker_path_i * hint_worker_step_r - 1) * 8 + hint_worker_from_f + hint_worker_path_i * hint_worker_step_f |+|
+!if | board[hint_worker_path_sq] > 0 | chess_hint_worker_advance |+|
+!var | hint_worker_path_i | hint_worker_path_i + 1 |+|
+!jump | chess_hint_worker_path |+|
+
+!label | chess_hint_worker_pawn |+|
+!if | hint_worker_df == 0 and hint_worker_dr == turn and hint_worker_target == 0 | chess_hint_worker_accept |+|
+!if | hint_worker_df == 0 and hint_worker_dr == 2 * turn and hint_worker_target == 0 and piece_moved[hint_worker_piece] == 0 and ((turn == 1 and hint_worker_from_r == 2) or (turn == -1 and hint_worker_from_r == 7)) | chess_hint_worker_pawn_double |+|
+!if | hint_worker_adf == 1 and hint_worker_dr == turn and hint_worker_target > 0 | chess_hint_worker_accept |+|
+!if | hint_worker_adf == 1 and hint_worker_dr == turn and hint_worker_target == 0 and hint_worker_to_f == ep_file and hint_worker_to_r == ep_rank and ep_victim > 0 | chess_hint_worker_accept |+|
+!jump | chess_hint_worker_advance |+|
+!label | chess_hint_worker_pawn_double |+|
+!var | hint_worker_middle | (hint_worker_from_r + turn - 1) * 8 + hint_worker_from_f |+|
+!if | board[hint_worker_middle] == 0 | chess_hint_worker_accept |+|
+!jump | chess_hint_worker_advance |+|
+
+!label | chess_hint_worker_knight |+|
+!if | (hint_worker_adf == 1 and hint_worker_adr == 2) or (hint_worker_adf == 2 and hint_worker_adr == 1) | chess_hint_worker_accept |+|
+!jump | chess_hint_worker_advance |+|
+
+!label | chess_hint_worker_king |+|
+!if | hint_worker_adf <= 1 and hint_worker_adr <= 1 | chess_hint_worker_accept |+|
+-- Castling rights and attacked transit squares are checked by chess_validate.
+!if | hint_worker_adf == 2 and hint_worker_dr == 0 and piece_moved[hint_worker_piece] == 0 | chess_hint_worker_accept |+|
+!jump | chess_hint_worker_advance |+|
+
+!label | chess_hint_worker_accept |+|
+!var | hint_worker_mask | hint_worker_mask + 2 ^ hint_worker_index |+|
+!label | chess_hint_worker_advance |+|
+!var | hint_worker_index | hint_worker_index + 1 |+|
+!jump | chess_hint_worker_next |+|
+!label | chess_hint_worker_done |+|
+!return | hint_worker_mask |+|
+!label | chess_hint_worker_end |+|
