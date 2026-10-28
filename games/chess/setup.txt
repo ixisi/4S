@@ -1,0 +1,36 @@
+-- Full-scene 3D viewport and original model.
+!renderer | create | name:ChessMatch | kind:3d |
+    width:screen.width | height:screen.height | locked:true |+|
+!wait | frame |+|
+!world3d | background | red:8,green:11,blue:21 |+|
+!chess_reset_camera |+|
+!world3d | import | path:"ABeautifulGame.glb" |
+    name:ChessMatch | x:0,y:0,z:-5 | scale:8 |+|
+
+-- Legal destinations: cyan for quiet moves, coral for ordinary captures.
+-- En passant uses purple; the taken pawn is beside its empty destination.
+!for | marker_i from 1 to 27 {
+    !var | marker_name | "MoveHint_" .. marker_i |+|
+    !world3d | box | name:(marker_name) | x:0,y:0.19,z:-5 |
+        width:0.38,height:0.025,depth:0.38 |
+        red:74,green:231,blue:215 | visible:0 |+|
+} |+|
+
+!renderer | create | name:ChessHUD | kind:pixel |
+    width:screen.width | height:hud_height | locked:true |+|
+!wait | frame |+|
+!canvas | create | name:ChessHUD | width:screen.width,height:hud_height |+|
+!chess_new_game |+|
+!var | started | 0 |+|
+!var | status | "CHOOSE A MODE IN THE START MENU" |+|
+!chess_hud |+|
+!renderer | create | name:ChessMenu | kind:pixel |
+    width:screen.width | height:screen.height | locked:true |+|
+!wait | frame |+|
+!canvas | create | name:ChessMenu |
+    width:screen.width,height:screen.height |+|
+!chess_menu_show |+|
+!wait | frame |+|
+!input | preview | focus |+|
+!input | preview_menu | block |+|
+!log | "4IM3 Chess ready. Choose a mode in the start menu." |+|
