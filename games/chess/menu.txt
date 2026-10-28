@@ -1,0 +1,204 @@
+-- A compact home/pause card over the orbiting board.
+!fn | chess_menu_draw | {
+    !if | join_visible == 1 { !chess_join_draw |+| !return |+| } |+|
+    !canvas | use | name:ChessMenu |+|
+    !canvas | fill | red:3,green:8,blue:15,opacity:116 |+|
+    !chess_ui_panel | menu_left+5 | menu_top+7 | menu_width | menu_height | 5 | 11 | 20 | 12 |+|
+    !chess_ui_panel | menu_left | menu_top | menu_width | menu_height | 17 | 27 | 42 | 12 |+|
+    !canvas | rectangle | x:menu_left+24,y:menu_top+18,width:40,height:3 |
+        red:234,green:195,blue:116 |+|
+    !chess_ui_text | "4IM3 CHESS" | menu_left+24 | menu_top+34 | 4 | 249 | 218 | 158 |+|
+    !chess_ui_text | (paused == 1 and "PAUSED / YOUR LOCAL MENU" or "PICK A GAME. MAKE YOUR MOVE.") |
+        menu_left+24 | menu_top+72 | 2 | 147 | 174 | 200 |+|
+    !var | menu_titles | [
+        (paused == 1 and "RESUME" or "VS COMPUTER"),
+        (paused == 1 and "NEW MATCH" or "LOCAL PLAY"),
+        (show_player_markers == 1 and "YOUR MOVES: ON" or "YOUR MOVES: OFF"),
+        (show_computer_markers == 1 and "BOT MOVES: ON" or "BOT MOVES: OFF"),
+        (mode == 2 and net_ready == 1 and net_role == 1 and "REMATCH" or "HOST ONLINE"),
+        (mode == 2 and net_ready == 1 and "LEAVE MATCH" or "JOIN ONLINE")
+    ] |+|
+    !var | menu_details | [
+        (paused == 1 and "BACK TO THE BOARD" or "PLAY AS WHITE"),
+        (paused == 1 and "RESET THE BOARD" or "TWO ON THIS PC"),"","",
+        (mode == 2 and net_ready == 1 and net_role == 1 and "RESTART BOTH BOARDS" or "INVITE / WHITE"),
+        (mode == 2 and net_ready == 1 and "DISCONNECT" or "INVITE / BLACK")
+    ] |+|
+    !for | target in menu_targets {
+        !if | target.id <= 6 {
+            !chess_ui_button | target | menu_titles[target.id] | menu_details[target.id] |
+                (menu_choice == target.id and 1 or 0) |+|
+        } |+|
+    } |+|
+    !chess_ui_text | "MOVE PREVIEWS" | menu_left+24 | menu_top+262 | 1 | 147 | 174 | 200 |+|
+    !chess_ui_text | "NETWORK / AUTOMATIC SETUP" |
+        menu_left+24 | menu_top+331 | 2 | 147 | 174 | 200 |+|
+    !chess_ui_text | "JOIN WITH A PRIVATE CODE" |
+        menu_left+38 | menu_top+362 | 2 | 230 | 237 | 247 |+|
+    !chess_ui_panel | menu_left+menu_width-104 | menu_top+350 | 80 | 38 |
+        (menu_choice == 9 and 82 or 32) | 60 | 78 | 6 |+|
+    !chess_ui_text | "AUTO" | menu_left+menu_width-90 | menu_top+362 | 2 | 230 | 237 | 247 |+|
+    !chess_ui_text | string.sub(net_notice,1,42) |
+        menu_left+24 | menu_top+406 | 2 | 243 | 199 | 128 |+|
+    !chess_ui_text | string.sub(net_notice,43,84) |
+        menu_left+24 | menu_top+426 | 2 | 243 | 199 | 128 |+|
+    !chess_ui_text | "ARROWS SELECT   ENTER OPEN   CLICK TO PLAY" |
+        menu_left+24 | menu_top+453 | 2 | 133 | 158 | 184 |+|
+    !canvas | update |+|
+} |+|
+
+!fn | chess_menu_step | direction | {
+    !var | menu_position | 1 |+|
+    !for | target_index from 1 to 7 {
+        !if | menu_targets[target_index].id == menu_choice { !var | menu_position | target_index |+| } |+|
+    } |+|
+    !var | menu_position | math.max(1,math.min(7,menu_position+direction)) |+|
+    !var | menu_choice | menu_targets[menu_position].id |+|
+    !chess_menu_draw |+|
+} |+|
+
+-- Both the rendered cards and mouse hit regions use menu_targets.
+!fn | chess_menu_pointer | {
+    !var | pointer_moved | (keys.x != menu_pointer_x or keys.y != menu_pointer_y) |+|
+    !var | menu_pointer_x | keys.x |+|
+    !var | menu_pointer_y | keys.y |+|
+    !for | target in menu_targets {
+        !if | menu_visible == 1 and keys.mouse_inside == 1 and
+            keys.x >= target.x and keys.x < target.x+target.width and
+            keys.y >= target.y and keys.y < target.y+target.height {
+            !if | keys.MOUSE_LEFT_pressed == 1 {
+                !var | menu_choice | target.id |+|
+                !chess_menu_activate |+|
+            } |+|
+            !else {
+                !if | pointer_moved and menu_choice != target.id {
+                    !var | menu_choice | target.id |+|
+                    !chess_menu_draw |+|
+                } |+|
+            } |+|
+        } |+|
+    } |+|
+} |+|
+
+!fn | chess_menu_activate | {
+    !if | menu_choice == 1 {
+        !if | paused == 1 { !chess_menu_resume |+| } |+|
+        !else { !chess_net_close |+| !var | mode | 1 |+| !chess_menu_start |+| } |+|
+        !return |+|
+    } |+|
+    !if | menu_choice == 2 {
+        !if | paused == 1 and mode == 2 {
+            !if | net_role == 1 { !chess_net_restart |+| } |+|
+            !else {
+                !var | net_notice | "ONLY THE HOST CAN RESTART THE ONLINE MATCH" |+|
+                !chess_menu_draw |+|
+            } |+|
+        } |+|
+        !else {
+            !if | paused == 0 { !chess_net_close |+| !var | mode | 0 |+| } |+|
+            !chess_menu_start |+|
+        } |+|
+        !return |+|
+    } |+|
+    !if | menu_choice == 3 {
+        !var | show_player_markers | 1 - show_player_markers |+|
+        !if | show_player_markers == 0 {
+            !var | hint_requested_piece | 0 |+|
+            !chess_hide_moves |+|
+        } |+|
+        !chess_menu_draw |+|
+        !return |+|
+    } |+|
+    !if | menu_choice == 4 {
+        !var | show_computer_markers | 1 - show_computer_markers |+|
+        !if | show_computer_markers == 0 and mode == 1 and turn == -1 {
+            !chess_hide_moves |+|
+        } |+|
+        !chess_menu_draw |+|
+        !return |+|
+    } |+|
+    !if | menu_choice == 5 {
+        !if | mode == 2 and net_role == 1 and net_ready == 1 { !chess_net_restart |+| } |+|
+        !else {
+            !if | mode == 2 and net_role == 1 and net_active == 1 { !chess_net_copy_invite |+| } |+|
+            !else { !chess_net_open | 1 |+| } |+|
+        } |+|
+    } |+|
+    !if | menu_choice == 6 {
+        !if | mode == 2 and net_ready == 1 { !chess_net_lost | "LEFT ONLINE MATCH" |+| } |+|
+        !else { !chess_join_show |+| } |+|
+    } |+|
+    !if | menu_choice == 9 {
+        !var | net_auto_address | 1 |+|
+        !var | net_lan_index | 0 |+|
+        !var | net_notice | "HOST WILL DETECT ITS LAN ADDRESS" |+|
+        !chess_menu_draw |+|
+    } |+|
+} |+|
+
+!fn | chess_menu_show | {
+    !var | join_visible | 0 |+|
+    !var | menu_visible | 1 |+|
+    !var | menu_choice | (paused == 1 and 1 or mode == 2 and
+        (net_role == 1 and 5 or 6) or mode == 1 and 1 or 2) |+|
+    !var | net_waiting | 0 |+|
+    !source | ChessHUD |+|
+    !hide |+|
+    !source |+|
+    !world3d | blur | amount:4 |+|
+    !chess_menu_draw |+|
+    !source | ChessMenu |+|
+    !show |+|
+    !source |+|
+} |+|
+
+-- Enter the board from a menu or a completed online handshake.
+!fn | chess_game_show | {
+    !var | paused | 0 |+|
+    !var | menu_visible | 0 |+|
+    !var | net_waiting | 0 |+|
+    !world3d | blur | amount:0 |+|
+    !source | ChessMenu |+|
+    !hide |+|
+    !source | ChessHUD |+|
+    !show |+|
+    !source |+|
+    !chess_hud |+|
+} |+|
+
+!fn | chess_menu_start | {
+    !chess_new_game |+|
+    !chess_game_show |+|
+} |+|
+
+!fn | chess_menu_pause | {
+    !var | pause_saved_mode | cam_mode |+|
+    !if | cam_mode == 1 {
+        !var | fp_yaw | cam_yaw |+|
+        !var | fp_pitch | cam_pitch |+|
+        !var | cam_mode | 0 |+|
+        !chess_reset_camera |+|
+    } |+|
+    !var | paused | 1 |+|
+    !chess_menu_show |+|
+} |+|
+
+!fn | chess_menu_resume | {
+    !var | paused | 0 |+|
+    !if | pause_saved_mode == 1 {
+        !var | cam_mode | 1 |+|
+        !var | cam_yaw | fp_yaw |+|
+        !var | cam_pitch | fp_pitch |+|
+        !chess_camera |+|
+    } |+|
+    !chess_game_show |+|
+    !if | selected_piece > 0 and (mode != 1 or turn == 1) and
+        show_player_markers == 1 and hint_count == 0 {
+        !chess_request_moves |+|
+    } |+|
+} |+|
+
+!fn | chess_menu_orbit | {
+    !var | cam_yaw | cam_yaw + math.max(0.005,math.min(0.08,tick)) * 13 |+|
+    !chess_camera |+|
+} |+|
