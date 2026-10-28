@@ -1,0 +1,366 @@
+-- Geometry stays in the original GLB. Logical moves shift its imported parts.
+!fn | chess_sync_piece | piece_id | {
+    !var | shift_file | initial_file[piece_id] - piece_file[piece_id] |+|
+    !var | shift_rank | piece_rank[piece_id] - model_home_rank[piece_id] |+|
+    !var | piece_render_name | "ChessMatch_" .. node_body[piece_id] |+|
+    !if | promoted_name[piece_id] != "" {
+        !var | piece_render_name | promoted_name[piece_id] |+|
+        !var | shift_file | 4 - piece_file[piece_id] |+|
+        !var | shift_rank | piece_rank[piece_id] - (side[piece_id] == 1 and 1 or 8) |+|
+    } |+|
+    !world3d | set | name:(piece_render_name) |
+        x:shift_file*0.5,y:0,z:-5+shift_rank*0.5 |
+        visible:piece_alive[piece_id] |+|
+    !if | node_top[piece_id] > 0 and promoted_name[piece_id] == "" {
+        !var | top_render_name | "ChessMatch_" .. node_top[piece_id] |+|
+        !world3d | set | name:(top_render_name) |
+            x:shift_file*0.5,y:0,z:-5+shift_rank*0.5 |
+            visible:piece_alive[piece_id] |+|
+    } |+|
+} |+|
+
+-- Move the imported body and pawn top together, then settle exactly on the square.
+!fn | chess_animate_piece | piece_id, start_file, start_rank, end_file, end_rank | {
+    !var | animated_body | "ChessMatch_" .. node_body[piece_id] |+|
+    !var | animated_top | (node_top[piece_id] > 0 and "ChessMatch_" .. node_top[piece_id] or "") |+|
+    !var | model_rank | model_home_rank[piece_id] |+|
+    !var | model_file | initial_file[piece_id] |+|
+    !if | promoted_name[piece_id] != "" {
+        !var | animated_body | promoted_name[piece_id] |+|
+        !var | animated_top | "" |+|
+        !var | model_file | 4 |+|
+        !var | model_rank | (side[piece_id] == 1 and 1 or 8) |+|
+    } |+|
+    !for | travel_step from 1 to 16 {
+        !wait | frame |+|
+        !var | travel_t | travel_step / 16 |+|
+        !var | travel_ease | travel_t * travel_t * (3 - 2 * travel_t) |+|
+        !var | travel_file | start_file + (end_file - start_file) * travel_ease |+|
+        !var | travel_rank | start_rank + (end_rank - start_rank) * travel_ease |+|
+        !var | travel_lift | (kind[piece_id] == 5 and 0.38 or 0.22) *
+            math.sin(pi * travel_t) |+|
+        !var | travel_x | (model_file - travel_file) * 0.5 |+|
+        !var | travel_z | -5 + (travel_rank - model_rank) * 0.5 |+|
+        !world3d | set | name:(animated_body) |
+            x:travel_x,y:travel_lift,z:travel_z |+|
+        !if | animated_top != "" {
+            !world3d | set | name:(animated_top) |
+                x:travel_x,y:travel_lift,z:travel_z |+|
+        } |+|
+    } |+|
+} |+|
+
+!fn | chess_selection | {
+    -- Restore both model parts before highlighting a different piece.
+    !if | highlighted_piece > 0 {
+        !var | old_body | (promoted_name[highlighted_piece] != "" and
+            promoted_name[highlighted_piece] or
+            "ChessMatch_" .. node_body[highlighted_piece]) |+|
+        !world3d | set | name:(old_body) |
+            red:255,green:255,blue:255 |+|
+        !if | node_top[highlighted_piece] > 0 and
+            promoted_name[highlighted_piece] == "" {
+            !var | old_top | "ChessMatch_" .. node_top[highlighted_piece] |+|
+            !var | top_red | (side[highlighted_piece] == 1 and 255 or 76) |+|
+            !var | top_green | (side[highlighted_piece] == 1 and 255 or 128) |+|
+            !var | top_blue | (side[highlighted_piece] == 1 and 211 or 115) |+|
+            !world3d | set | name:(old_top) |
+                red:top_red,green:top_green,blue:top_blue |+|
+        } |+|
+        !var | highlighted_piece | 0 |+|
+    } |+|
+    !if | selected_piece == 0 { !return |+| } |+|
+    !var | highlight_body | (promoted_name[selected_piece] != "" and
+        promoted_name[selected_piece] or
+        "ChessMatch_" .. node_body[selected_piece]) |+|
+    !var | pick_red | (side[selected_piece] == 1 and 85 or 255) |+|
+    !var | pick_green | (side[selected_piece] == 1 and 215 or 72) |+|
+    !var | pick_blue | (side[selected_piece] == 1 and 255 or 82) |+|
+    !world3d | set | name:(highlight_body) |
+        red:pick_red,green:pick_green,blue:pick_blue |+|
+    !if | node_top[selected_piece] > 0 and promoted_name[selected_piece] == "" {
+        !var | highlight_top | "ChessMatch_" .. node_top[selected_piece] |+|
+        !world3d | set | name:(highlight_top) |
+            red:pick_red,green:pick_green,blue:pick_blue |+|
+    } |+|
+    !var | highlighted_piece | selected_piece |+|
+} |+|
+
+-- Reuse a small pool of markers. A queen has at most 27 destinations.
+!fn | chess_hide_moves | {
+    !if | hint_count > 0 {
+        !for | hint_i from 1 to hint_count {
+            !var | hint_name | "MoveHint_" .. hint_i |+|
+            !world3d | set | name:(hint_name) | visible:0 |+|
+        } |+|
+    } |+|
+    !var | hint_count | 0 |+|
+} |+|
+
+-- capture_kind: 0=empty square, 1=ordinary capture, 2=en passant.
+!fn | chess_draw_hint | square, capture_kind | {
+    !var | hint_count | hint_count + 1 |+|
+    !var | hint_name | "MoveHint_" .. hint_count |+|
+    !var | hint_file | ((square - 1) % 8) + 1 |+|
+    !var | hint_rank | math.floor((square - 1) / 8) + 1 |+|
+    !var | hint_x | (4.5 - hint_file) * 0.5 |+|
+    !var | hint_z | -7.25 + hint_rank * 0.5 |+|
+    !if | mode == 1 and turn == -1 {
+        !world3d | set | name:(hint_name) | x:hint_x,z:hint_z |
+            red:255,green:140,blue:28 | visible:1 |+|
+        !return |+|
+    } |+|
+    !if | capture_kind == 2 {
+        !world3d | set | name:(hint_name) | x:hint_x,z:hint_z |
+            red:186,green:106,blue:255 | visible:1 |+|
+        !var | en_passant_hint | 1 |+|
+    } |+|
+    !if | capture_kind == 1 {
+        !world3d | set | name:(hint_name) | x:hint_x,z:hint_z |
+            red:255,green:94,blue:75 | visible:1 |+|
+    } |+|
+    !if | capture_kind == 0 {
+        !world3d | set | name:(hint_name) | x:hint_x,z:hint_z |
+            red:74,green:231,blue:215 | visible:1 |+|
+    } |+|
+} |+|
+
+!fn | chess_show_moves | {
+    !chess_hide_moves |+|
+    !if | selected_piece == 0 { !return |+| } |+|
+    !if | mode == 1 and turn == -1 and show_computer_markers == 0 {
+        !return |+|
+    } |+|
+    !if | (mode != 1 or turn == 1) and show_player_markers == 0 {
+        !return |+|
+    } |+|
+    !var | en_passant_hint | 0 |+|
+    !for | target_square from 1 to 64 {
+        !if | target_square % 8 == 1 { !wait | frame |+| } |+|
+        !var | possible_file | ((target_square - 1) % 8) + 1 |+|
+        !var | possible_rank | math.floor((target_square - 1) / 8) + 1 |+|
+        !chess_validate | selected_piece | possible_file | possible_rank |+|
+        !if | legal == 1 {
+            !var | capture_kind | (candidate_ep_square > 0 and 2 or
+                candidate_capture > 0 and 1 or 0) |+|
+            !chess_draw_hint | target_square | capture_kind |+|
+        } |+|
+    } |+|
+    !if | en_passant_hint == 1 and (mode != 1 or turn == 1) {
+        !var | status | "EN PASSANT: PURPLE SQUARE TAKES ADJACENT PAWN" |+|
+    } |+|
+} |+|
+
+-- Player markers are searched on copied board data. The existing validator
+-- checks king safety for the few worker candidates before they are shown.
+!fn | chess_start_hint_search | {
+    !var | hint_search_piece | hint_requested_piece |+|
+    !var | hint_search_turn | turn |+|
+    !var | hint_worker_selected | hint_search_piece |+|
+    !var | hint_worker_first | 1 |+|
+    !worker | chess_hint_worker_search | chess_hint_low_job |+|
+    !var | hint_worker_first | 33 |+|
+    !worker | chess_hint_worker_search | chess_hint_high_job |+|
+    !var | hint_phase | 1 |+|
+} |+|
+
+!fn | chess_request_moves | {
+    !chess_hide_moves |+|
+    !var | en_passant_hint | 0 |+|
+    !var | hint_requested_piece | (show_player_markers == 1 and selected_piece or 0) |+|
+    !if | hint_requested_piece > 0 and hint_phase == 0 {
+        !chess_start_hint_search |+|
+    } |+|
+} |+|
+
+!fn | chess_poll_moves | {
+    !if | hint_phase == 0 { !return |+| } |+|
+    !if | chess_hint_low_job.state == "running" or
+        chess_hint_high_job.state == "running" { !return |+| } |+|
+    !if | chess_hint_low_job.state != "done" or
+        chess_hint_high_job.state != "done" {
+        !var | status | "MOVE SEARCH FAILED: " ..
+            (chess_hint_low_job.error or chess_hint_high_job.error or "WORKER STOPPED") |+|
+        !var | hint_requested_piece | 0 |+|
+        !var | hint_phase | 0 |+|
+        !worker | release | chess_hint_low_job |+|
+        !worker | release | chess_hint_high_job |+|
+        !chess_hud |+|
+        !return |+|
+    } |+|
+    !var | hint_low_mask | chess_hint_low_job.value |+|
+    !var | hint_high_mask | chess_hint_high_job.value |+|
+    !worker | release | chess_hint_low_job |+|
+    !worker | release | chess_hint_high_job |+|
+    !var | hint_phase | 0 |+|
+    !if | selected_piece != hint_search_piece or
+        hint_requested_piece != hint_search_piece or
+        turn != hint_search_turn or game_over == 1 or started == 0 {
+        !if | hint_requested_piece > 0 and selected_piece == hint_requested_piece and
+            started == 1 and game_over == 0 {
+            !chess_start_hint_search |+|
+        } |+|
+        !return |+|
+    } |+|
+    !var | en_passant_hint | 0 |+|
+    !for | target_square from 1 to 64 {
+        !var | hint_bit | (target_square - 1) % 32 |+|
+        !var | hint_mask | (target_square <= 32 and hint_low_mask or hint_high_mask) |+|
+        !if | math.floor(hint_mask / math.pow(2,hint_bit)) % 2 == 1 {
+            !var | possible_file | ((target_square - 1) % 8) + 1 |+|
+            !var | possible_rank | math.floor((target_square - 1) / 8) + 1 |+|
+            !chess_validate | selected_piece | possible_file | possible_rank |+|
+            !if | legal == 1 {
+                !var | capture_kind | (candidate_ep_square > 0 and 2 or
+                    candidate_capture > 0 and 1 or 0) |+|
+                !chess_draw_hint | target_square | capture_kind |+|
+            } |+|
+        } |+|
+    } |+|
+    !if | en_passant_hint == 1 and (mode != 1 or turn == 1) {
+        !var | status | "EN PASSANT: PURPLE SQUARE TAKES ADJACENT PAWN" |+|
+        !chess_hud |+|
+    } |+|
+} |+|
+
+!fn | chess_promote | promoted_piece | {
+    !var | pawn_body_name | "ChessMatch_" .. node_body[promoted_piece] |+|
+    !var | pawn_top_name | "ChessMatch_" .. node_top[promoted_piece] |+|
+    !var | template_name | (side[promoted_piece] == 1 and "ChessMatch_4" or "ChessMatch_3") |+|
+    !var | new_name | "ChessPromoted_" .. promoted_piece |+|
+    !world3d | duplicate | name:(template_name) | as:(new_name) |+|
+    !world3d | set | name:(pawn_body_name) | visible:0 |+|
+    !world3d | set | name:(pawn_top_name) | visible:0 |+|
+    !var | promoted_name[promoted_piece] | new_name |+|
+    !var | kind[promoted_piece] | 2 |+|
+    !chess_sync_piece | promoted_piece |+|
+} |+|
+
+!fn | chess_new_game | {
+    !worker | release | chess_ai_job |+|
+    !var | hint_requested_piece | 0 |+|
+    !var | selected_piece | 0 |+|
+    !chess_selection |+|
+    -- Remove previous promotion clones before restoring the original pieces.
+    !for | piece_i from 1 to 32 {
+        !if | promoted_name[piece_i] != nil and promoted_name[piece_i] != "" {
+            !world3d | remove | name:(promoted_name[piece_i]) |+|
+        } |+|
+    } |+|
+    !for | square_i from 1 to 64 { !var | board[square_i] | 0 |+| } |+|
+    !for | node_i from 1 to 49 { !var | node_piece[node_i] | 0 |+| } |+|
+    !for | piece_i from 1 to 32 {
+        !var | kind[piece_i] | initial_kind[piece_i] |+|
+        !var | piece_file[piece_i] | initial_file[piece_i] |+|
+        !var | piece_rank[piece_i] | initial_rank[piece_i] |+|
+        !var | piece_alive[piece_i] | 1 |+|
+        !var | piece_moved[piece_i] | 0 |+|
+        !var | promoted_name[piece_i] | "" |+|
+        !var | initial_square | (piece_rank[piece_i] - 1) * 8 + piece_file[piece_i] |+|
+        !var | board[initial_square] | piece_i |+|
+        !var | node_piece[node_body[piece_i]] | piece_i |+|
+        !if | node_top[piece_i] > 0 {
+            !var | node_piece[node_top[piece_i]] | piece_i |+|
+        } |+|
+        !chess_sync_piece | piece_i |+|
+    } |+|
+    !var | turn | 1 |+|
+    !var | selected_piece | 0 |+|
+    !chess_hide_moves |+|
+    !var | ep_file | 0 |+|
+    !var | ep_rank | 0 |+|
+    !var | ep_victim | 0 |+|
+    !var | game_over | 0 |+|
+    !var | ai_pending | 0 |+|
+    !var | ai_search_active | 0 |+|
+    !var | ai_rejected | [] |+|
+    !var | started | 1 |+|
+    !var | last_move | "" |+|
+    !var | status | "WHITE TO MOVE" |+|
+    !chess_selection |+|
+    !chess_hud |+|
+} |+|
+
+!fn | chess_after_move | {
+    !var | turn | -turn |+|
+    !if | mode == 1 and turn == -1 {
+        !var | ai_pending | 1 |+|
+        !var | ai_search_active | 0 |+|
+        !var | status | "COMPUTER THINKING" |+|
+        !chess_hud |+|
+        !return |+|
+    } |+|
+    !chess_find_any_move |+|
+    !var | king_to_test | (turn == 1 and 1 or 17) |+|
+    !chess_attacked | piece_file[king_to_test] | piece_rank[king_to_test] |
+        -turn | -> | side_in_check |+|
+    !if | scan_found == 0 {
+        !var | game_over | 1 |+|
+        !if | side_in_check == 1 {
+            !var | status | (turn == 1 and "CHECKMATE - BLACK WINS" or "CHECKMATE - WHITE WINS") |+|
+        } |+|
+        !else { !var | status | "STALEMATE - DRAW" |+| } |+|
+    } |+|
+    !else {
+        !var | status | (turn == 1 and "WHITE TO MOVE" or "BLACK TO MOVE") |+|
+        !if | side_in_check == 1 { !var | status | status .. " - CHECK" |+| } |+|
+    } |+|
+    !chess_hud |+|
+} |+|
+
+!fn | chess_commit | moving, to_f, to_r | {
+    !if | legal == 0 { !return |+| } |+|
+    !var | hint_requested_piece | 0 |+|
+    !var | old_f | piece_file[moving] |+|
+    !var | old_r | piece_rank[moving] |+|
+    !var | old_sq | (old_r - 1) * 8 + old_f |+|
+    !var | new_sq | (to_r - 1) * 8 + to_f |+|
+    !var | moving_kind | kind[moving] |+|
+    !var | taken | candidate_capture |+|
+    !var | rook_to_move | candidate_rook |+|
+    !var | ep_clear | candidate_ep_square |+|
+    !chess_hide_moves |+|
+    !var | selected_piece | 0 |+|
+    !chess_selection |+|
+    !chess_animate_piece | moving | old_f | old_r | to_f | to_r |+|
+    !if | taken > 0 {
+        !var | piece_alive[taken] | 0 |+|
+        !if | ep_clear > 0 { !var | board[ep_clear] | 0 |+| } |+|
+        !chess_sync_piece | taken |+|
+    } |+|
+    !var | board[old_sq] | 0 |+|
+    !var | board[new_sq] | moving |+|
+    !var | piece_file[moving] | to_f |+|
+    !var | piece_rank[moving] | to_r |+|
+    !var | piece_moved[moving] | 1 |+|
+    !chess_sync_piece | moving |+|
+    !if | rook_to_move > 0 {
+        !var | rook_old_file | piece_file[rook_to_move] |+|
+        !var | rook_new_file | (to_f == 7 and 6 or 4) |+|
+        !chess_animate_piece | rook_to_move | rook_old_file | old_r |
+            rook_new_file | old_r |+|
+        !var | rook_old_sq | (piece_rank[rook_to_move] - 1) * 8 + piece_file[rook_to_move] |+|
+        !var | rook_new_sq | (piece_rank[rook_to_move] - 1) * 8 + rook_new_file |+|
+        !var | board[rook_old_sq] | 0 |+|
+        !var | board[rook_new_sq] | rook_to_move |+|
+        !var | piece_file[rook_to_move] | rook_new_file |+|
+        !var | piece_moved[rook_to_move] | 1 |+|
+        !chess_sync_piece | rook_to_move |+|
+    } |+|
+    !var | ep_file | 0 |+|
+    !var | ep_rank | 0 |+|
+    !var | ep_victim | 0 |+|
+    !if | moving_kind == 6 and math.abs(to_r - old_r) == 2 {
+        !var | ep_file | to_f |+|
+        !var | ep_rank | (old_r + to_r) / 2 |+|
+        !var | ep_victim | moving |+|
+    } |+|
+    !if | moving_kind == 6 and (to_r == 8 or to_r == 1) {
+        !chess_promote | moving |+|
+    } |+|
+    !var | last_move | file_letter[old_f+1] .. old_r .. "-" .. file_letter[to_f+1] .. to_r |+|
+    !if | ep_clear > 0 { !var | last_move | last_move .. " e.p." |+| } |+|
+    !var | selected_piece | 0 |+|
+    !chess_selection |+|
+    !chess_after_move |+|
+} |+|
