@@ -1,0 +1,123 @@
+-- One private code contains all connection details. Nothing connects on open.
+!fn | chess_join_show | {
+    !var | join_visible | 1 |+|
+    !var | join_choice | 1 |+|
+    !var | join_replace | 1 |+|
+    !var | join_pointer_x | -1 |+|
+    !var | join_pointer_y | -1 |+|
+    !var | net_notice | "PASTE THE PRIVATE CODE FROM THE HOST" |+|
+    !input | text | join_discard |+|
+    !chess_join_draw |+|
+} |+|
+
+!fn | chess_join_draw | {
+    !canvas | use | name:ChessMenu |+|
+    !canvas | fill | red:3,green:8,blue:15,opacity:116 |+|
+    !chess_ui_panel | menu_left | menu_top+60 | menu_width | 352 | 17 | 27 | 42 | 12 |+|
+    !chess_ui_text | "JOIN ONLINE" | menu_left+24 | menu_top+90 | 4 | 249 | 218 | 158 |+|
+    !chess_ui_text | "ONE PRIVATE CODE. READY TO PLAY." | menu_left+24 | menu_top+136 |+|
+    !chess_ui_text | "PRIVATE CONNECTION CODE" | menu_left+24 | menu_top+164 |+|
+    !var | join_titles | [
+        (join_invite == "" and "CLICK TO TYPE CODE" or "CODE HIDDEN / " .. string.len(join_invite) .. " CHARS"),
+        "PASTE","CONNECT","BACK"
+    ] |+|
+    !for | item in join_targets {
+        !chess_ui_button | item | join_titles[item.id] | "" | (join_choice == item.id and 1 or 0) |+|
+    } |+|
+    !chess_ui_text | "CLICK FIELD TO REPLACE. CTRL+V PASTES." | menu_left+24 | menu_top+244 | 2 | 147 | 174 | 200 |+|
+    !chess_ui_text | string.sub(net_notice,1,42) | menu_left+24 | menu_top+346 | 2 | 243 | 199 | 128 |+|
+    !chess_ui_text | string.sub(net_notice,43,84) | menu_left+24 | menu_top+366 | 2 | 243 | 199 | 128 |+|
+    !chess_ui_text | "TAB SELECT   ENTER NEXT / CONNECT   ESC BACK" | menu_left+24 | menu_top+390 | 2 | 133 | 158 | 184 |+|
+    !canvas | update |+|
+} |+|
+
+!fn | chess_join_paste | {
+    !clipboard | paste | into:join_clipboard |+|
+    !if | join_clipboard.ok == 0 {
+        !var | net_notice | "CLIPBOARD UNAVAILABLE. TYPE THE CODE INSTEAD." |+|
+    } |+|
+    !else {
+        !var | pasted | string.gsub(join_clipboard.text,"%s","") |+|
+        !if | string.len(pasted) > 153 {
+            !var | net_notice | "PASTE REJECTED: COPY THE COMPLETE HOST CODE" |+|
+        } |+|
+        !else {
+            !var | join_invite | pasted |+|
+            !var | net_notice | "PRIVATE CODE PASTED / HIDDEN" |+|
+            !var | join_choice | 1 |+|
+            !var | join_replace | 0 |+|
+        } |+|
+    } |+|
+    !chess_join_draw |+|
+} |+|
+
+!fn | chess_join_activate | {
+    !if | join_choice == 1 { !var | join_choice | 3 |+| } |+|
+    !else {
+        !if | join_choice == 2 { !chess_join_paste |+| } |+|
+        !else {
+            !if | join_choice == 3 {
+                !if | join_invite == "" {
+                    !var | net_notice | "PRIVATE CONNECTION CODE REQUIRED" |+|
+                } |+|
+                !else {
+                    !var | net_invite | join_invite |+|
+                    !chess_net_open | 0 |+|
+                } |+|
+            } |+|
+            !if | join_choice == 4 { !chess_menu_show |+| !return |+| } |+|
+        } |+|
+    } |+|
+    !if | join_visible == 1 { !chess_join_draw |+| } |+|
+} |+|
+
+!fn | chess_join_input | {
+    !if | keys.ESCAPE_pressed == 1 { !chess_menu_show |+| !return |+| } |+|
+    !if | keys.TAB_pressed == 1 or keys.DOWN_pressed == 1 or keys.UP_pressed == 1 {
+        !var | join_choice | ((join_choice-1+((keys.UP_pressed == 1 or keys.SHIFT == 1) and -1 or 1)) % 4)+1 |+|
+        !var | join_replace | 1 |+|
+        !chess_join_draw |+|
+    } |+|
+    !var | pointer_moved | (keys.x != join_pointer_x or keys.y != join_pointer_y) |+|
+    !var | join_pointer_x | keys.x |+|
+    !var | join_pointer_y | keys.y |+|
+    !for | item in join_targets {
+        !if | keys.mouse_inside == 1 and keys.x >= item.x and keys.x < item.x+item.width and
+            keys.y >= item.y and keys.y < item.y+item.height {
+            !if | keys.MOUSE_LEFT_pressed == 1 {
+                !var | join_choice | item.id |+|
+                !var | join_replace | 1 |+|
+                !if | item.id > 1 { !chess_join_activate |+| } |+|
+                !else { !chess_join_draw |+| } |+|
+            } |+|
+            !else {
+                !if | pointer_moved and join_choice > 1 and item.id > 1 and join_choice != item.id {
+                    !var | join_choice | item.id |+|
+                    !chess_join_draw |+|
+                } |+|
+            } |+|
+        } |+|
+    } |+|
+    !if | join_visible == 0 { !return |+| } |+|
+    !input | text | join_typed |+|
+    !if | join_choice == 1 {
+        !if | keys.CTRL == 1 and keys.A_pressed == 1 { !var | join_replace | 1 |+| } |+|
+        !if | keys.CTRL == 1 and keys.V_pressed == 1 { !chess_join_paste |+| } |+|
+        !if | keys.CTRL == 0 and join_typed != "" {
+            !var | edited | (join_replace == 1 and "" or join_invite) |+|
+            !var | join_replace | 0 |+|
+            !for | typed_index from 1 to string.len(join_typed) {
+                !var | typed_char | string.sub(join_typed,typed_index,typed_index) |+|
+                !if | typed_char == "\b" { !var | edited | string.sub(edited,1,math.max(0,string.len(edited)-1)) |+| } |+|
+                !else {
+                    !if | string.match(typed_char,"[%w%-]") != nil and string.len(edited) < 153 {
+                        !var | edited | edited .. typed_char |+|
+                    } |+|
+                } |+|
+            } |+|
+            !var | join_invite | edited |+|
+            !chess_join_draw |+|
+        } |+|
+    } |+|
+    !if | keys.ENTER_pressed == 1 { !chess_join_activate |+| } |+|
+} |+|
