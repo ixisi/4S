@@ -39,7 +39,7 @@ This single-file reference explains the language syntax, commands, values, units
 
 ## Install and run
 
-1. In OBS, open **Tools → Scripts**, add `4IM3-SCRIPT-2.3.0.lua`, and leave it loaded. OBS must have Lua scripting available. The engine registers two source types: **4IM3 Pixel Renderer** and **4IM3 Shader Renderer**.
+1. In OBS, open **Tools → Scripts**, add `4IM3-SCRIPT-2.3.0.lua`, and leave it loaded. OBS must have Lua scripting available. The engine registers three source types: **4IM3 Pixel Renderer**, **4IM3 Shader Renderer**, and **4IM3 3D Renderer**.
 2. Choose **OUTPUT: FILE** and select a UTF-8 `.txt` or `.4im3` program, or choose **OUTPUT: TEXT** and paste commands. **OUTPUT: INPUT** is a one-line input. Press **Execute** to compile and start the program. Loading the engine by itself does not execute the program field.
 3. Look at the active OBS scene for graphics. Use **Help → Log Files → View Current Log** for `!log`, validation errors, and stack traces.
 4. Set **Script work budget per tick (ms)** between 1 and 20 if needed; the default is 6. This is a cap on script work per OBS tick, **not** a game FPS setting. A program that needs a new picture each frame should use `!wait | frame |+|`.
@@ -136,10 +136,16 @@ suffix:
 !command | arguments | -> | result |+|
 ```
 
-`result` is the destination variable name, not a quoted string or an expression.
-It must start with a letter or underscore and contain only letters, digits,
-and underscores. The engine creates it if needed, or updates its existing
-scope. Declared types are checked. The arrow and destination must be the last
+`result` is a destination name or table path, not a quoted string. Its root
+starts with a letter or underscore and contains letters, digits, and underscores.
+Examples include `result`, `player.score`, and `results[index]`. Index expressions
+are evaluated in the caller's scope when the result is assigned. The engine
+creates a missing destination or updates its owning scope. Declared types are
+checked; invalid indexes such as nil/NaN report errors.
+
+Persistent native-job and independent-task names still require simple identifiers:
+`!worker | (value*2) | -> | job |+|` names the job. To copy an existing job's status
+into a table field, use `!worker | read | job | -> | results.job |+|`. The arrow and destination must be the last
 two fields before `|+|`.
 
 For commands with an existing output field, the arrow replaces that field:
@@ -177,7 +183,7 @@ forms continue to work.
 | `!input`: `key`, `mouse` | A table with numeric `down`, `pressed`, and `released` fields. The original separate output variables remain supported. |
 | `!input`: `pointer` | A table with `x`, `y`, `mouse_inside`, and `focused`. The last two fields are numeric 0 or 1. |
 | `!input`: `recenter` | A table with `supported`, `warped` (numeric 0/1), and source coordinates `x`, `y`. |
-| `!input`: `focus`, `text`, `wheel` | A numeric focus flag, typed UTF-8 text, or wheel delta. |
+| `!input`: `focus`, `text`, `wheel`, `status` | A numeric focus flag, typed UTF-8 text, wheel delta, or backend diagnostic record. |
 | `!array` with `unpack`, or `!array.unpack` | A decoded table; omit `name:` when using the arrow. |
 | `!array.copy` | A deep copy of the source table. Supply only the source before the arrow. |
 | `!array.pop` | The removed last entry. An empty array leaves the destination unchanged. |
@@ -1471,13 +1477,14 @@ Passwords are masked display, not encrypted application storage.
 !ui | value | name | -> | entered |+|
 !ui | get | name | -> | field_info |+|
 !ui | state | -> | ui_info |+|
+!ui | use | "OtherCanvas" |+|    -- select an existing UI canvas for new widgets
 ```
 
 `value` returns only the control value. `get` returns a fresh record containing
 `name`, `kind`, `text`, `value` where applicable, `checked`, absolute UI `x/y`,
 `width`, `height`, effective `visible` and `enabled`, `focused`, and `hovered`.
 Boolean state fields are numeric 1/0. `state` returns the focused/hovered control
-names (or empty strings), `pointer_captured`, `keyboard_captured`, and `error`
+names (or empty strings), `pointer_captured`, `keyboard_captured`, `error`, and the selected canvas `surface`, `width`, and `height`
 (the latest clipboard error, or empty). Clipboard availability follows the
 existing OS backend; failure retains the field value and is available in `error`.
 All three getters also accept `into:variable` instead of the final arrow.
@@ -1669,13 +1676,13 @@ other registered event handlers remain active.
 ### Pointer control and platform support
 
 `!input | recenter | -> | cursor |+|` moves the pointer once to the center of
-the focused, bound preview or viewport on Windows. The positional output form
+the focused, bound preview or viewport on Windows or macOS. The positional output form
 `!input | recenter | cursor |+|` and the form without an output are also valid.
 The returned record contains `supported` (0/1), `warped` (0/1), and `x,y` in
 source pixels. `warped:1` means those coordinates are the new center; otherwise
 they are the sampled pointer coordinates. No warp occurs when OBS is unfocused,
 the pointer is outside the preview, or no preview/viewport is bound. Native
-recentering is unavailable on Linux/macOS and in renderer Interact callbacks;
+recentering is unavailable on Linux and in renderer Interact callbacks;
 check `warped` and provide a fallback. This does not hide the system pointer.
 
 For a centered mouse-look mode, sample input, calculate movement from the last
@@ -1685,11 +1692,11 @@ Only call it while gameplay has control. This is a single cursor movement with n
 hook, clipping region, persistent capture, or extra DLL; stopping calls immediately
 releases control, including on pause, Stop, reload, and shutdown.
 
-On Windows, `!input | preview |+|` binds the pointer to the OBS main scene preview or a focused **Preview Projector** window. Its `x` and `y` are active scene canvas coordinates, and `interaction_source` is `ScenePreview` while inside. The engine automatically reads the main preview's Window, Canvas, Output, or manual scaling and scroll positions from OBS's bundled Qt 6 controls; no script setting is needed. Manual scaling is recovered from the displayed scaled dimensions with pixel rounding. Those controls are read asynchronously on OBS's UI thread. Input waits for a valid snapshot after startup or a resize; it does not block OBS. Projectors use their own letterboxed view independently of the main preview's zoom. If an older OBS/Qt build does not expose the preview controls, use **Scale to Window** for the fallback mapping. No Interact window or additional library file is needed. `preview` and `viewport` replace each other when called again. UI widgets use this same automatic mapping.
+On Windows or macOS, `!input | preview |+|` binds the pointer to the OBS main scene preview or a focused **Preview Projector** window. Its `x` and `y` are active scene canvas coordinates, and `interaction_source` is `ScenePreview` while inside. The engine automatically reads the main preview's Window, Canvas, Output, or manual scaling and scroll positions from OBS's bundled Qt 6 controls; no script setting is needed. Manual scaling is recovered from the displayed scaled dimensions with pixel rounding. Those controls are read asynchronously on OBS's UI thread. Input waits for a valid snapshot after startup or a resize; it does not block OBS. Projectors use their own letterboxed view independently of the main preview's zoom. On Windows, an older OBS/Qt build can use **Scale to Window** for fallback mapping. On macOS, unavailable Qt metadata is reported through `!input | status`; the engine leaves preview pointer input inactive instead of guessing its coordinates. No Interact window or additional library file is needed. `preview` and `viewport` replace each other when called again. UI widgets use this same automatic mapping.
 
-Use `!input | preview | focus |+|` to bind the preview and request keyboard focus for it on OBS's UI thread. This is useful at game startup or after a click inside the game: otherwise a previously selected zoom dropdown or source list can still react to the game's arrow keys. The request is asynchronous and does not bring OBS in front of another application. A focused Preview Projector keeps its focus. This does not disable OBS shortcuts or consume keys; keep game renderer scene items locked if arrow keys should not nudge them in OBS.
+On Windows, use `!input | preview | focus |+|` to bind the preview and request keyboard focus for it on OBS's UI thread. This is useful at game startup or after a click inside the game: otherwise a previously selected zoom dropdown or source list can still react to the game's arrow keys. The request is asynchronous and does not bring OBS in front of another application. A focused Preview Projector keeps its focus. This does not disable OBS shortcuts or consume keys; keep game renderer scene items locked if arrow keys should not nudge them in OBS.
 
-`!projector | fullscreen | monitor:0 |+|` opens OBS's current Preview Projector fullscreen on monitor index 0. The monitor attribute is optional and defaults to 0; use `monitor:1` for the next display. The projector follows OBS's current preview scene. Esc closes the projector window and returns to the main OBS preview; OBS stays open. To bind a key in a frame loop, include `F` in an input snapshot, then call `!if | keys.F_pressed == 1 { !projector | fullscreen | monitor:0 |+| } |+|`. On Windows, the command queues the request for OBS's UI thread and returns immediately; the window appears when that thread processes it. It also binds focused keyboard and scene-relative mouse input to the Preview Projector, so movement and mouse controls continue there without a separate `!input | preview` call. A Preview Projector opened through OBS's own menu is bound automatically when it gains focus. Pressing F while that projector already has focus does not open another. This command uses OBS's frontend API and requires no additional library file.
+`!projector | fullscreen | monitor:0 |+|` opens OBS's current Preview Projector fullscreen on monitor index 0. The monitor attribute is optional and defaults to 0; use `monitor:1` for the next display. The projector follows OBS's current preview scene. Esc closes the projector window and returns to the main OBS preview; OBS stays open. To bind a key in a frame loop, include `F` in an input snapshot, then call `!if | keys.F_pressed == 1 { !projector | fullscreen | monitor:0 |+| } |+|`. On Windows and macOS, the command queues the request for OBS's UI thread and returns immediately; the window appears when that thread processes it. It also binds focused keyboard and scene-relative mouse input to the Preview Projector, so movement and mouse controls continue there without a separate `!input | preview` call. A Preview Projector opened through OBS's own menu is bound automatically when it gains focus. Pressing F while that projector already has focus does not open another. This command uses OBS's frontend API and requires no additional library file.
 
 To keep Esc for a game's pause/menu action, opt in to projector key controls:
 
@@ -1728,7 +1735,50 @@ For games that use right-button drag over OBS's preview or a **Preview Projector
 
 `!input | wheel | wheel_steps |+|` reads relative mouse-wheel movement while OBS has focus and the pointer is inside its main scene preview or focused Preview Projector after `!input | preview |+|`. Positive values mean wheel up; negative values mean wheel down; `0` means no new movement. Fractional values are possible on high-resolution wheels. Read it once per frame: each read consumes the accumulated movement. On Windows it uses the system DirectInput library through LuaJIT FFI, with no project DLL or Interact window. Wheel polling is not yet implemented on Linux or macOS, where this command returns `0`.
 
-Windows polls the focused OBS main window or Preview Projector; Linux/X11 polls the focused OBS window through the system X11 library. The engine no longer has a command that opens OBS Interact. `!input | viewport | View |+|` remains available if a user manually opens that source's Interact window in OBS. The current engine has no direct macOS keyboard polling path; OBS interaction callbacks require a manually opened Interact window and have not been verified there. A window cannot receive a key while another window owns keyboard focus. `!onpress | HotkeyName | pressed_label | optional_released_label |+|` is an alternative: it registers an OBS hotkey, which the user binds in OBS Settings → Hotkeys.
+Windows polls the focused OBS main window or Preview Projector; Linux/X11 polls the focused OBS window through the system X11 library. The engine no longer has a command that opens OBS Interact. `!input | viewport | View |+|` remains available if a user manually opens that source's Interact window in OBS. macOS polls Quartz key/button state and maps the main preview or a focused Preview Projector through an isolated Lua state on macOS's asynchronous main queue. It does not require Interact. Live macOS behavior remains unverified. A window cannot receive a key while another window owns keyboard focus. `!onpress | HotkeyName | pressed_label | optional_released_label |+|` is an alternative: it registers an OBS hotkey, which the user binds in OBS Settings → Hotkeys.
+
+### macOS input
+
+macOS uses its installed ApplicationServices/Carbon frameworks and OBS's bundled
+LuaJIT/Qt libraries. No additional package or project DLL is installed. Keyboard
+and button state come from [Quartz Event Services](https://developer.apple.com/documentation/coregraphics/cgeventsource/keystate(_:key:)?language=objc).
+OBS's preview geometry is read on its UI thread in an isolated Lua state;
+callbacks do not enter the running program's Lua state from another thread.
+
+Enable **OBS** under **System Settings → Privacy & Security → Input Monitoring**
+when permission is denied, then restart OBS if macOS requests it. The engine
+checks permission without automatically opening a permission dialog. See
+[Apple's Input Monitoring instructions](https://support.apple.com/en-ca/guide/mac-help/mchl4cedafb6/mac).
+Accessibility and Screen Recording access are not requested by this backend.
+
+```text
+!input | preview |+|
+!input | status | -> | diagnostic |+|
+!log | ("Backend: "..diagnostic.backend..", permission: "..diagnostic.permission..", error: "..diagnostic.error) |+|
+```
+
+`status` returns `platform`, `backend` (`quartz`, `win32`, `x11`, `interact`, or
+`unsupported`), `available` (0/1), `permission` (`granted`, `denied`, or
+`not_required`), `ready` (0/1), and `error`. On macOS, `available` describes the
+native backend; `ready` describes the most recent view geometry. The first UI
+sample is asynchronous, so `ready:0` during startup is normal. Keys can still
+work when a Qt version cannot expose preview geometry; inspect `error`.
+
+The main preview requires OBS with Qt 6 metadata support. Window/Canvas/Output
+and manual zoom, scroll position, Retina backing scale, negative monitor
+coordinates, and Preview Projector letterboxing are accounted for. Input stops
+when another application or an unrelated OBS dialog has focus; UI snapshots
+older than 250 ms are rejected. During focus changes or while waiting for a
+fresh snapshot, input may briefly read zero. macOS callbacks and snapshot storage
+are released asynchronously in main-queue order on engine unload/shutdown.
+
+macOS keyboard polling includes both Shift/Control/Option/Command keys, the
+number pad, and both Enter keys. `ALT` means Option; `META`, `CMD`, and `COMMAND`
+mean Command. Text fallback uses a US key layout, one character per key press;
+it does not provide international layout translation, key repeat, or IME
+composition. Wheel polling, preview-menu suppression, projector key overrides,
+and automatic preview focus remain unavailable on macOS. The implementation
+has mocked Intel/Apple Silicon coverage; it still needs a live macOS OBS test.
 
 | Input action | Fields after action | Output |
 | --- | --- | --- |
@@ -1737,15 +1787,16 @@ Windows polls the focused OBS main window or Preview Projector; Linux/X11 polls 
 | `pointer` | `x_var \| y_var \| inside_var` | Renderer-local pointer position and inside flag; outside positions are `-1`. |
 | `wheel` | `steps_var` | Relative wheel steps on Windows while the pointer is inside the main scene preview or focused Preview Projector. |
 | `focus` | `focused_var` | Numeric focus flag. |
+| `status` | `output_var` or `->` output | Platform/backend availability, permission state, geometry readiness, and diagnostic error. |
 | `snapshot` | `table_var \| key_name...` | One table with focus, pointer, and requested key/button states. |
 | `keys` | `table_var \| key_name...` | Focus and keyboard states without pointer polling. Mouse keys are rejected. |
 | `viewport` | `renderer_source_name` | Map native mouse coordinates in that source's Interact preview to renderer pixels. |
-| `preview` | optional `focus` | On Windows, map mouse coordinates in the main scene preview or focused Preview Projector to scene pixels. `focus` also requests keyboard focus for the preview. |
+| `preview` | optional `focus` | On Windows/macOS, map mouse coordinates in the main scene preview or focused Preview Projector to scene pixels. The optional `focus` request requires Windows; click the preview on macOS. |
 | `recenter` | optional output variable, or `->` output | One focused pointer movement to the bound preview/viewport center; returns `supported`, `warped`, `x`, `y`. |
 | `preview_menu` | `block` or `allow` | On Windows, suppress or restore right-click menus in the main preview and Preview Projector for a running game. |
 | `text` | `output_var` | Text typed since the previous read; backspace is returned as `\b`. Empty string means no new text. |
 
-Accepted key names are `A`–`Z`, `0`–`9`, `NUMPAD0`–`NUMPAD9`, `NUMPAD_DECIMAL`, `NUMPAD_ADD`, `NUMPAD_SUBTRACT`, `NUMPAD_MULTIPLY`, `NUMPAD_DIVIDE`, `NUMPAD_SEPARATOR`, `F1`–`F12`, `UP`, `DOWN`, `LEFT`, `RIGHT`, `HOME`, `END`, `DELETE`, `ENTER`, `SPACE`, `ESCAPE`, `TAB`, `BACKSPACE`, `SHIFT`, `CTRL`, `ALT`, `MOUSE_LEFT`, `MOUSE_RIGHT`, `MOUSE_MIDDLE`, `MOUSE_X1`, and `MOUSE_X2`. Aliases include `RETURN`, `ESC`, `CONTROL`, `DEL` (for `DELETE`), `MOUSE1`–`MOUSE3`, `KP_0`–`KP_9`, and `NUMPAD_0`–`NUMPAD_9`. `ENTER` accepts either Enter key; `KP_ENTER` and `NUMPAD_ENTER` are aliases for it. Number-row keys and named keypad digits remain separate when polling.
+Accepted key names are `A`–`Z`, `0`–`9`, `NUMPAD0`–`NUMPAD9`, `NUMPAD_DECIMAL`, `NUMPAD_ADD`, `NUMPAD_SUBTRACT`, `NUMPAD_MULTIPLY`, `NUMPAD_DIVIDE`, `NUMPAD_SEPARATOR`, `F1`–`F12`, `UP`, `DOWN`, `LEFT`, `RIGHT`, `HOME`, `END`, `DELETE`, `ENTER`, `SPACE`, `ESCAPE`, `TAB`, `BACKSPACE`, `SHIFT`, `CTRL`, `ALT`, `META`, `MOUSE_LEFT`, `MOUSE_RIGHT`, `MOUSE_MIDDLE`, `MOUSE_X1`, and `MOUSE_X2`. Aliases include `RETURN`, `ESC`, `CONTROL`, `CMD`/`COMMAND` (for `META`), `DEL` (for `DELETE`), `MOUSE1`–`MOUSE3`, `KP_0`–`KP_9`, and `NUMPAD_0`–`NUMPAD_9`. `ENTER` accepts either Enter key; `KP_ENTER` and `NUMPAD_ENTER` are aliases for it. Number-row keys and named keypad digits remain separate when polling.
 
 ```text
 !input | keys | controls | NUMPAD1 | NUMPAD_DECIMAL | ENTER |+|
@@ -1755,9 +1806,9 @@ Accepted key names are `A`–`Z`, `0`–`9`, `NUMPAD0`–`NUMPAD9`, `NUMPAD_DECI
 
 Text input accepts keypad digits, decimal point, and `+ - * /` (plus a keypad separator where provided). On Windows, turn **Num Lock on** to type digits; Num Lock off retains the operating system's navigation behavior. The Linux X11 fallback uses XKB to distinguish numeric text from keypad navigation with Num Lock/Shift. Keypad Enter submits through `ENTER` rather than inserting a character. These mappings follow [Windows virtual-key codes](https://learn.microsoft.com/en-us/windows/win32/inputdev/virtual-key-codes) and [X11 keyboard symbol lookup](https://www.x.org/releases/current/doc/libX11/XKB/xkblib.html).
 
-For naming parts or files, call `!input | text | typed |+|` once per frame and append `typed` to your editor's own text field. The command returns printable UTF-8 from OBS interaction events where available. Its Windows and Linux polling fallback supports US keyboard letters, numbers, spaces, common punctuation, Shift, and Backspace, one character per key press; it does not implement key repeat or full IME text composition. Control/Alt combinations are ignored. The script decides how to handle `\b`, Enter, and on-screen focus. On Linux/X11, keep an OBS window focused; other Linux sessions and macOS still require a working Interact event path.
+For naming parts or files, call `!input | text | typed |+|` once per frame and append `typed` to your editor's own text field. The command returns printable UTF-8 from OBS interaction events where available. Its Windows, Linux/X11, and macOS polling fallback supports US keyboard letters, numbers, spaces, common punctuation, Shift, and Backspace, one character per key press; it does not implement key repeat or full IME text composition. Control/Alt combinations are ignored, as are Command combinations on macOS. The script decides how to handle `\b`, Enter, and on-screen focus. On Linux/X11 and macOS, keep the supported OBS window focused; other Linux sessions still require a working Interact event path.
 
-For music timing, `!media | Music | restart |+|` starts a media source, `!media_wait | Music | 12.5s |+|` waits until an **absolute** playhead position, and `!media_time | Music | playhead_ms |+|` reads the current position. Absolute cues avoid drift from chains of relative waits. `!wait | frame` yields until the next OBS tick and updates `tick`; `!wait | 500ms` waits for a duration. Drawing code should normally use `frame`, then multiply speed by `tick`.
+For music timing, `!media | Music | restart |+|` starts a media source, `!media_wait | Music | 12.5s |+|` waits until an **absolute** playhead position, and `!media_time | Music | playhead_ms |+|` reads the current position. Absolute cues avoid drift from chains of relative waits. `!wait | frame` yields until the next OBS tick and updates `tick`; `!wait | 500ms` waits for an elapsed wall-clock duration. Numeric milliseconds and existing time suffixes remain supported. Drawing code should normally use `frame`, then multiply speed by `tick`.
 
 ## Runtime diagnostics
 
@@ -1783,6 +1834,52 @@ visits the current object tables.
 Compare samples under similar conditions after warm-up. Lua memory may rise
 between collections, and caches can grow initially before reaching steady use.
 Combine these counters with worker/mesh stage timings and actual frame intervals.
+
+### Completed tick timings
+
+```text
+!runtime | timings | -> | performance |+|
+!log | ("Main commands: "..performance.main_ms.." ms") |+|
+!runtime | timings | into : diagnostics.performance |+|
+```
+
+The query returns a detached snapshot of the **last completed active engine tick**,
+so a command running mid-tick cannot mix unfinished and previous measurements.
+Before the first completed tick, `ready` is 0 and the stage durations are zero.
+The query does not start workers, force collection, or change the budget.
+All `*_ms` values are elapsed wall time measured around CPU-side work, including
+any waiting inside those calls. They are not OS process CPU usage or hardware
+GPU execution time. Single commands/native uploads still cannot yield midway.
+
+| Field | Meaning |
+| --- | --- |
+| `ready`, `ticks` | Numeric readiness flag and completed active tick count since Execute. |
+| `tick_ms`, `budget_ms`, `budget_percent` | Measured tick duration, its configured budget, and duration/budget × 100. Percent can exceed 100. |
+| `events_ms` | Input sampling, networking, observers, and event scheduling, excluding animation. |
+| `animation_ms`, `async_ms`, `main_ms` | Automatic animation, cooperative tasks, and main commands. |
+| `collision_ms`, `ui_ms`, `background_ms`, `cleanup_ms` | Collision work, UI rendering, deferred work, and end-of-program connection/input cleanup. |
+| `worker_poll_ms`, `mesh_prepare_ms` | Detail **inside** `background_ms`; do not add them again to the tick total. Mesh publication/driver work can also occur in renderer callbacks outside this tick. |
+| `mean_ms`, `min_ms`, `peak_ms` | Tick duration statistics since Execute. Hiding a diagnostic view does not reset them. |
+| `interval_ms`, `obs_tick_fps` | OBS-provided tick interval and its reciprocal. This is **not** game animation or rendered FPS. |
+| `job_count`, `jobs` | Current retained native jobs and copied records containing `name`, `state`, and their existing timing/byte metrics. These are not cumulative launch counters. |
+| `mesh_count`, `meshes` | Pending mesh jobs across retained engine worlds, with `world`, `name`, and copied status fields. Completed jobs leave this list. |
+
+The main stage durations (events, animation, async, main, collision, UI,
+background, cleanup) divide the timed work. Instrumentation gaps and timer
+rounding can prevent an exact sum matching `tick_ms`. Job/mesh records describe each
+job's lifetime and can overlap these stages; do not add their totals to a tick.
+Worker `launch_ms`, `startup_ms`, and `capture_ms` can overlap each other.
+Upload timings measure CPU-side preparation/driver calls, not GPU execution.
+Execute resets timing history. `!runtime | stats` additionally reports
+`ui_surfaces` and `ui_surface` (the selected UI canvas name or an empty string).
+
+A diagnostic UI can query `timings` every 250 ms and put its values into ordinary
+labels. Update only its own controls. When creating an additional UI canvas,
+remember `stats.ui_surface` and restore it with `!ui | use | canvas_name |+|`
+so subsequent application controls stay on the intended canvas. Hiding a UI
+retains its bounded canvas storage for reuse; Stop/Execute/unload release the
+normal engine-owned UI resources. Measurements include the diagnostic UI's own
+work. Keep live OBS testing and resource observations alongside these counters.
 
 ## Event handlers
 
@@ -2216,7 +2313,7 @@ use `clear | program` for a complete reset. Keep the program running with a
 frame loop or wait while asynchronous results are needed. Stop, reload,
 program completion and shutdown clean up all program workers.
 
-Within a worker block/label, the supported commands are `!var`, `!array.push`, `!if` (label form), `!jump`, `!label`, and a required reachable `!return`. Pure worker expressions are bounded arithmetic/comparisons, not arbitrary Lua. A worker label may contain at most 1,024 reachable commands and execute at most 1,000,000 interpreted steps per run. The engine allows up to four running and eight retained jobs; copied input is capped at 256 KiB (up to 16,384 inspected values, six nested table levels, and 64 KiB per string). Result states are `running`, `done`, `error`, and `cancelled` (double **l**). Release finished jobs when you no longer need them.
+Within a worker block/label, the supported commands are `!var`, `!array.push`, `!if` (label form), `!jump`, `!label`, and a required reachable `!return`. Pure worker expressions are bounded arithmetic/comparisons, not arbitrary Lua. A worker label may contain at most 1,024 reachable commands and execute at most 1,000,000 interpreted steps per run. The engine allows up to four running and eight retained jobs; copied input has a 4 MiB budget (up to 524,288 inspected values, six nested table levels, and 64 KiB per string). Result states are `running`, `done`, `error`, and `cancelled` (double **l**). Release finished jobs when you no longer need them.
 
 Input values are captured completely at launch, using one validation/encoding
 pass. Later writes in the main program cannot change that worker's input.
@@ -2668,7 +2765,7 @@ host; the engine does not configure either or provide router traversal.
 
 ```text
 !fetch | "https://example.test/data.json" | -> | response |+|
-!module | load | helpers.lua |+|
+!module | load | "helpers.lua" |+|
 ```
 
 `!fetch` accepts HTTP/HTTPS URLs and uses the host's existing `curl` executable.
@@ -2679,7 +2776,7 @@ positional destination form `!fetch | url | response |+|` also works. A decoded
 JSON object/array is returned when parsing succeeds; otherwise the response is
 text. Temporary helper files are removed when the request completes or times out.
 
-An optional Lua module returns an installer function. Its command registrations
+Module paths may be bare or quoted; quote paths containing spaces. Relative paths follow the entry program directory. An optional Lua module returns an installer function. Its command registrations
 are published together only after installation succeeds:
 
 ```lua
@@ -2753,10 +2850,10 @@ This index covers the engine's public command families. `[…]` means optional; 
 
 | Command | Form / effect |
 | --- | --- |
-| `!ui` | Persistent `frame`/`panel`/`box`, `label`, `button`, `input`, `checkbox`, `slider`, `tabs`; named styles/CSS declarations, bindings, listeners, getters, and cleanup. See [UI controls](#ui-controls). |
-| `!input` | `press/release/hold \| key \| { ... }`, `off \| key/all`; also `key`, `mouse`, `pointer`, `recenter`, `wheel`, `focus`, `snapshot`, `keys`, `text`, `preview`, `preview_menu`, `viewport`; see [input](#input-and-timing). |
-| `!runtime` | `stats \| -> \| variable` or `stats \| into:variable`; read current Lua memory and worker/task/object/connection counts. See [runtime diagnostics](#runtime-diagnostics). |
-| `!events` | `off \| all`, or `off \| family \| [selector] \| [event_kind]`; remove block handlers. See [event handlers](#event-handlers). |
+| `!ui` | Persistent `frame`/`panel`/`box`, `label`, `button`, `input`, `checkbox`, `slider`, `tabs`; named styles/CSS declarations, bindings, listeners, getters, and cleanup. `use \| canvas_name` selects an existing UI canvas. See [UI controls](#ui-controls). |
+| `!input` | `press/release/hold \| key \| { ... }`, `remove \| key`, `clear \| all`; also `key`, `mouse`, `pointer`, `recenter`, `wheel`, `focus`, `status`, `snapshot`, `keys`, `text`, `preview`, `preview_menu`, `viewport`. Older `off` works. See [input](#input-and-timing). |
+| `!runtime` | `stats` or `timings`, followed by `-> \| variable` or `into:variable`; read resource counts or completed tick/job timing snapshots. See [runtime diagnostics](#runtime-diagnostics). |
+| `!events` | `clear \| all`, or `remove \| family \| [selector] \| [event_kind]`; remove block handlers. Older `off` works. See [event handlers](#event-handlers). |
 | `!projector` | `fullscreen \| [monitor:index]`; Windows `controls \| escape:game/default,exit_key:F11` and `close`; configurable game/projector keys and focused-projector closure. |
 | `!onpress` | `hotkey_name \| press_label \| [release_label]`; register an OBS hotkey and callbacks. |
 | `!start_task`, `!start_independent_task` | `label_or_block`; the independent form also accepts `-> \| task_name`. Cooperative tasks. Older `!run`/`!spawn` work. |
@@ -2881,11 +2978,18 @@ The parser also recognizes `[[variable1,variable2]] [label] !command...` to watc
 
 ## Troubleshooting
 
+Unknown commands can include a `did you mean !command?` hint. Hints do not
+redirect execution: built-ins, functions, widgets, modules, and selected-source
+methods keep their existing resolution rules. Compatibility aliases remain
+supported; error messages prefer the documented names (`read`, `release`,
+`remove`/`clear`, `update`, and `connection`). Legacy positional input outputs
+now report type mismatches just like arrow result records.
+
 | Symptom | Check |
 | --- | --- |
 | Nothing appears | Press **Execute**; check the active scene for the renderer name, then ensure the program calls `!canvas \| create` and `!canvas \| update`. The renderer name and buffer name must match. |
 | A source command fails | Match its name exactly and make it a direct item in the active scene. Missing names are logged with the scene name. |
-| Input is always zero | Focus OBS's main window on Windows or Linux/X11 and poll inside a frame loop. Check `focused` from `!input \| focus` or a snapshot. On macOS, direct polling is not implemented. |
+| Input is always zero | Focus OBS's main window on Windows or Linux/X11 and poll inside a frame loop. Check `focused` from `!input \| focus` or a snapshot. On macOS, enable OBS Input Monitoring permission and check `!input \| status \| -> \| diagnostic \|+\|`; the UI snapshot may need a few ticks to become ready. |
 | Game animation looks slow while OBS FPS is fine | Check how often the program reaches `!canvas \| update` and `!wait \| frame`. Avoid redrawing a large static background pixel by pixel each frame. |
 | A loop stops with a runaway error | Add a deliberate `!wait \| frame` or make the loop terminate. A large command budget is not a substitute for yielding. |
 | A function seems to run immediately | `!fn` bodies are registered only. A `!label` body, however, lies in normal flow unless you jump around it. |
