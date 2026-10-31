@@ -8,6 +8,7 @@ This single-file reference explains the language syntax, commands, values, units
 
 - [Install and run](#install-and-run)
 - [First program](#first-program)
+- [Engine super commands](#engine-super-commands)
 - [Language syntax](#language-syntax)
   - [Assigning command results](#assigning-command-results)
 - [Values, expressions, and tables](#values-expressions-and-tables)
@@ -39,9 +40,9 @@ This single-file reference explains the language syntax, commands, values, units
 
 ## Install and run
 
-1. In OBS, open **Tools → Scripts**, add `4IM3-SCRIPT-2.3.0.lua`, and leave it loaded. OBS must have Lua scripting available. The engine registers three source types: **4IM3 Pixel Renderer**, **4IM3 Shader Renderer**, and **4IM3 3D Renderer**.
+1. In OBS, open **Tools Ã¢â€ â€™ Scripts**, add `4IM3-SCRIPT-2.3.0.lua`, and leave it loaded. OBS must have Lua scripting available. The engine registers three source types: **4IM3 Pixel Renderer**, **4IM3 Shader Renderer**, and **4IM3 3D Renderer**.
 2. Choose **OUTPUT: FILE** and select a UTF-8 `.txt` or `.4im3` program, or choose **OUTPUT: TEXT** and paste commands. **OUTPUT: INPUT** is a one-line input. Press **Execute** to compile and start the program. Loading the engine by itself does not execute the program field.
-3. Look at the active OBS scene for graphics. Use **Help → Log Files → View Current Log** for `!log`, validation errors, and stack traces.
+3. Look at the active OBS scene for graphics. Use **Help Ã¢â€ â€™ Log Files Ã¢â€ â€™ View Current Log** for `!log`, validation errors, and stack traces.
 4. Set **Script work budget per tick (ms)** between 1 and 20 if needed; the default is 6. This is a cap on script work per OBS tick, **not** a game FPS setting. A program that needs a new picture each frame should use `!wait | frame |+|`.
 
 Pressing **Execute** again resets program variables, tasks, functions, sprite definitions, and canvas buffers. `!save` values stored in OBS settings can be loaded on a later run. Relative resource paths follow the selected output mode:
@@ -59,6 +60,213 @@ you press Execute and stays fixed until the next Execute. For example,
 `path:"models/object.glb"` in File mode refers to a `models` folder beside the
 selected entry program.
 
+### Switching OBS scenes
+
+Without a header, leaving the scene where Execute started the program
+**stops execution**, including cooperative tasks and handlers. Returning does
+not restart it; press Execute. This prevents subsequent commands from trying
+to use renderers that belong to the previous scene. Scene-bound commands also
+verify the identity of a scene they have already fetched, so a delayed frontend
+notification cannot turn a scene change into a missing-renderer fatal error.
+This adds an identity check, not another frontend lookup or continuous UI poll.
+The cache is refreshed by scene and transition-completion notifications.
+
+Add a super command near the start of the entry program to choose another behavior:
+
+```text
+!!engine | on_scene_change | pause |+|
+```
+
+This pauses command execution, cooperative tasks, input/UI callbacks, collisions,
+and automatic model animations when you leave the scene where Execute started
+the program. Returning to that scene resumes the same program state. Scene UUIDs
+identify it, so a rename does not count as switching to a different scene.
+
+```text
+!!engine | on_scene_change | reset |+|
+```
+
+`on_scene_change | clear/refresh` are equivalent reset options. The original
+`change | pause/clear/refresh` syntax also remains supported.
+
+This stops the program on leaving its scene: it cancels tasks and workers,
+closes connections, releases sound/UI/pixel buffers, clears 3D objects and
+animations, and clears program variables/functions. Returning does **not**
+restart it; press Execute to start again. Pre-existing OBS sources remain in
+place. 3D GPU caches follow the renderer's normal cleanup on its next draw or
+source destruction.
+
+The selected rule lasts until Execute/restart; the last executed rule wins.
+`on_scene_change | continue` deliberately keeps execution running across scenes.
+The programmer must manage which sources exist in each scene; missing renderers
+are not automatically created. `on_scene_change | stop` selects the default
+stop behavior explicitly.
+
+With the `pause` rule:
+
+Frame deltas, numeric waits, timed script effects, emitters, and lifetime tasks
+exclude the paused interval. Input history and UI pointer capture reset on
+return; keys already held must be released before they can trigger again.
+Owned sounds that were playing pause and resume as well. Rendering retains
+the last published frame while script execution is paused.
+
+Native calculations and external processes already launched can finish while
+paused; their script-side results are handled after returning. Connection
+transport maintenance continues, but game message handlers are paused. Remote
+players and real network/process timeouts keep using real time; switching
+scenes does not pause another computer or an external media source.
+
+### Engine super commands
+
+`!!engine` controls the current program. These are engine rules and actions,
+not event handlers with a `{ ... }` body. They do not affect other OBS scripts
+or grant operating-system permissions. Use literal control words; preload paths
+can be quoted strings or string variables. Unknown
+super commands/arguments raise errors; they never fall through to functions,
+widgets or source methods. Native workers cannot execute super commands.
+`!engine` is not an alias for `!!engine`.
+
+```text
+!!engine | on_scene_change | pause |+|
+!!engine | on_focus_loss | pause |+|
+!!engine | on_error | reset |+|
+!!engine | budget | 6ms |+|
+!!engine | diagnostics | on |+|
+```
+
+| Command | Behavior |
+| --- | --- |
+| `!!engine \| on_scene_change \| pause/reset/continue/stop` | Choose scene-change behavior. Default: `stop`. See [switching scenes](#switching-obs-scenes). |
+| `!!engine \| on_focus_loss \| pause` | Pause when the supported OBS window or Preview Projector loses focus; resume when focus returns. `continue` disables this rule. Normal input focus rules still apply. |
+| `!!engine \| on_error \| reset` | Report a fatal script error, retain its console stack trace, then reset the program. `stop` stops the whole program while retaining variables. Neither retries the failed command nor restarts automatically. |
+| `!!engine \| budget \| 6ms` | Set the work budget for subsequent ticks within the existing 1–20 ms range. Bare numbers mean milliseconds; `0.006s` also means 6 ms. Expressions and variables are not accepted. |
+| `!!engine \| diagnostics \| on` | Collect detailed command timings. `off` stops measuring but retains the records. Execute/restart clears them. |
+| `!!engine \| preload \| models \| "model.glb"` | Prepare explicitly listed models in memory for later imports. See [model preloading](#model-preloading). |
+| `!!engine \| restart` | Reset, reload and execute the current program. File mode rereads the executed entry file and includes. Text/Input mode reuses the text originally executed, even if the UI field changed. |
+| `!!engine \| stop` | Stop the whole program, including tasks, handlers and automatic model animation scheduling. Wait for Execute; scene/focus changes do not resume it. |
+
+`change`, `focus`, and `error` remain aliases for `on_scene_change`,
+`on_focus_loss`, and `on_error`. Scene `clear/refresh` mean reset-and-wait;
+`error | clear` means `on_error | reset`. They never clear the OBS console.
+Scene refresh does not reload the engine Lua file or restart automatically.
+
+Execute/restart resets these rules and restores the budget from the engine UI;
+headers can apply them again. Without a focus rule, execution continues after
+losing focus. Without an error rule, existing error behavior is unchanged.
+Normal failure records such as `{ok:0,error:...}` and worker `error` states are
+data, not fatal script errors.
+
+Scene and focus pauses compose: all enabled pause conditions must clear before
+execution resumes. They preserve waits, task lifetimes, frame timing and input
+release behavior as described above. Focus detection uses the existing input
+backends: Linux requires the supported X11 path; macOS retains its documented
+permissions and live-testing limitations. An unavailable backend reports an
+error rather than guessing.
+
+Reset/restart/stop requests take effect at a safe tick boundary after the current
+command or callback scope has been restored. Later commands do not execute while
+an action is pending. Program-owned work/state is cleaned up; `!save` values
+remain in OBS settings, and pre-existing user scene sources remain in place.
+Restart uses the captured program location and scene dimensions; press Execute
+after changing scene resolution to capture the new dimensions.
+
+#### Model preloading
+
+Preloading is optional and starts when execution reaches the command. Put it
+before gameplay to prepare known model files during startup. It creates no
+scene objects and needs no renderer.
+
+```text
+!!engine | preload | models | "assets/fox.glb" | "assets/vehicle.obj" |+|
+!var | chosen_model | "assets/fox.glb" |+|
+-- Create a 3D renderer before importing.
+!renderer | create | name:World,kind:3d,width:screen.width,height:screen.height |+|
+!world3d | import | name:Player,path:chosen_model | -> | loaded |+|
+!runtime | preload | -> | prepared |+|
+```
+
+Supported formats are OBJ, glTF and GLB. In File mode, relative paths use the
+entry script's folder, just like ordinary model imports. A preload path may
+also be a string variable; its current value is read when that command runs.
+Listing possible files does not freeze the variable used by a later import.
+Unlisted models load normally, and ordinary imports do not automatically add
+models to the preload cache.
+
+The cache holds parsed geometry, materials, animation definitions and the model's
+default starting pose. Imports from it reuse engine-owned read-only asset data,
+with private transforms, binding names and animation playback state. Geometry
+edits make a private copy before writing; animation publishes private posed
+vertices. Editing or animating one instance does not change another or the
+prepared template. `get` and `snapshot` still return detached copies that scripts
+can modify safely. Import results include `preloaded:1` for a cached instance
+or `preloaded:0` for a normal file load, alongside `ok`, `error` and
+`names`. Check `ok` before using the imported objects.
+
+```text
+!!engine | preload | reload | "assets/fox.glb" |+|
+!!engine | preload | release | "assets/vehicle.obj" |+|
+!!engine | preload | clear |+|
+```
+
+Repeating `models` reuses an existing template; `model` is an alias for `models`.
+`reload` rereads and replaces the listed templates. `release` drops selected
+templates, while `clear` drops all of them and resets preload statistics.
+Neither removes models already displayed. A multi-file preload/reload publishes
+its templates only after every requested file parses successfully.
+
+Templates are explicit snapshots. The engine does not check the files again on
+each cache read. After changing a model or its parsed dependencies, use `reload`
+or release and preload it again. Execute, restart, reset, whole-program stop and
+engine unload also release the cache.
+
+These optimizations are enabled by the preload declaration; an import without a
+matching prepared asset keeps the normal loading path. Preparing the default
+pose happens once during preload, including default morph weights and skinning.
+Starting or seeking a particular animation clip still calculates its requested
+pose per instance. Clearing/reloading the cache leaves live instances valid;
+their shared data remains alive until its last user is released.
+
+This trades startup preparation and retained asset memory for less repeated
+parsing, copying and default-pose work. Parsing and preparing one file are
+synchronous and can exceed the tick budget. GPU buffers and texture decoding/upload are still prepared through
+the renderer when displayed. External texture images remain file references;
+this command does not preload their decoded pixels. Embedded texture bytes are
+retained with the parsed model. Preloading does not guarantee hitch-free imports.
+
+`!runtime | preload | -> | prepared` returns detached metadata:
+
+| Field | Meaning |
+| --- | --- |
+| `models` | Number of retained templates. |
+| `parses` | Successfully committed file parses, including reloads. |
+| `hits` | Cached instances served to imports; a subsequent import validation failure can still count an instance. |
+| `prepare_ms`, `copy_ms` | Cumulative CPU-side asset preparation (including the default pose) and private instance-record setup elapsed milliseconds. `copy_ms` retains its name for compatibility; large immutable arrays are reused rather than deep-copied on cache hits. |
+| `root_bytes` | Total root-file bytes for retained templates, excluding dependent files and parsed memory overhead. |
+| `assets` | Records sorted by path, containing `path`, `format`, `parts`, `vertices`, `triangles`, `root_bytes` and `prepare_ms`. |
+
+#### Detailed command timings
+
+```text
+!!engine | diagnostics | on |+|
+-- Execute the work to measure here.
+!runtime | diagnostics | -> | report |+|
+!!engine | diagnostics | off |+|
+```
+
+The detached result has `enabled` (0/1), `command_count`, `calls`, `total_ms`,
+and `commands`, sorted by descending total time. Each command record contains
+`command`, `line`, `calls`, `total_ms`, `mean_ms`, `max_ms`, `main_calls`,
+`task_calls`, and `errors`. Groups use command text, line and main/task category;
+repeated task instances accumulate without retaining their closures. Identical
+text at the same relative line in different bodies may share a group. Snapshots
+include completed invocations; the query itself appears in a later snapshot.
+
+These measure elapsed CPU-side interpreter work, not GPU time or background
+worker computation. A `wait` measures its checks, not the interval between
+ticks. A worker call includes launch/transfer work; its own metrics describe
+background computation. Detailed timing adds overhead and emits no per-command
+console messages. Normal `!runtime | timings` works without enabling it.
+
 ## First program
 
 Paste this into **OUTPUT: TEXT** and press **Execute**. It creates its own renderer source in the current scene, draws one frame, and writes a message to the OBS log:
@@ -73,7 +281,7 @@ Paste this into **OUTPUT: TEXT** and press **Execute**. It creates its own rende
 !log | "HelloView is ready" |+|
 ```
 
-`!renderer | create` adds or configures a direct scene source of the requested kind. `!canvas | create` makes a pixel buffer and selects it. Drawing changes that buffer; `!canvas | update` sends the finished image to the renderer. The 320 × 180 buffer is scaled to the renderer's 640 × 360 output.
+`!renderer | create` adds or configures a direct scene source of the requested kind. `!canvas | create` makes a pixel buffer and selects it. Drawing changes that buffer; `!canvas | update` sends the finished image to the renderer. The 320 Ãƒâ€” 180 buffer is scaled to the renderer's 640 Ãƒâ€” 360 output.
 
 `!renderer | create` also accepts `locked:true` or `locked:false` to set the OBS scene item's lock. Omit it to keep the current lock state; locking helps when a script uses mouse drags over OBS's main preview.
 
@@ -117,6 +325,46 @@ The normal statement shape is:
 ```
 
 Quoted strings may use `'single'` or `"double"` quotes. Quotes protect separators and commas inside a string. Use quotes for literal text that might otherwise be mistaken for a variable or expression. The parser is purpose-built, so do not assume arbitrary Lua syntax or Lua libraries are accepted.
+
+Value arguments read variables directly; parentheses are not needed simply to
+read a variable. This includes resource names in renderer, canvas, 3D, sprite,
+animation, UI, media and connection commands, OBS source selection, and input
+key arguments. Numeric and table inputs retain their usual expression rules.
+
+```text
+!var | view_name | "GameView" |+|
+!renderer | create | name:view_name,kind:pixel,width:640,height:360 |+|
+!canvas | create | name:view_name,width:640,height:360 |+|
+!use_sources | view_name |+|
+!var | caption | "Continue" |+|
+!var | button_name | "play_button" |+|
+!ui | create |+|
+!ui | button | play_button | text:caption |+|
+!ui | hide | button_name |+|
+```
+
+Known variables take priority over legacy bare text in value fields. For
+example, `name:view_name` reads the renderer name from `view_name`, while
+`name:"view_name"` uses the literal text. Undeclared bare values remain literal
+for compatibility with older scripts.
+
+Widget declarations introduce identifiers: `!ui | button | play_button` defines
+the widget `play_button`. Use `!play_button | text:caption` to change it directly.
+Existing widget identifiers take priority in generic forms such as
+`!ui | hide | play_button`, even if a counter variable also uses `play_button`.
+No quotes are needed to address a widget. A generic selector without a matching
+widget ID may read a string alias: `!ui | hide | button_name` targets
+`play_button` when `button_name` contains `"play_button"`.
+Values are read when a command runs, rather than cached at compilation. Event
+selectors are read when the listener is registered; changing the selector
+variable later does not move an existing listener to another widget/key.
+
+Syntax is distinct from values: command/action words (`create`, `hide`, `set`),
+attribute keys, function parameters, label declarations, widget/style declarations, variable declarations,
+UI `bind`, and output destinations (`into:result`, `-> | result`) remain names
+or control words. Reading the destination's existing value would prevent an
+assignment from updating it. Worker and connection event selectors may also
+refer to their resource records by ID.
 
 **Named fields** are supported by `!renderer | create`, the drawing `!canvas` commands, `!array | unpack`, `!sprite`, and `!animation`. In a named call, field order can vary and comma groups can replace some pipes. Do not mix positional and named values in one call. For named `!canvas` calls, the action itself may appear anywhere among fields:
 
@@ -177,7 +425,7 @@ forms continue to work.
 | `!clipboard`: `copy`, `paste` | `{ok,text,error}`, as with `into:`. |
 | `!world3d`: `list`, `stats`, `get`, `bounds`, `snapshot`, `pick`, `camera`, `view`, `spotlight`, `background`, `mesh`, `instances` | The same table as `into:`. Camera, view, light and background commands can update supplied fields before returning their current values. Async meshes and instance batches return a live build-status record. |
 | `!physics`: `step` | A new physics-state table; the input state remains unchanged. Accepts `into:` or `->`. |
-| `!world3d`: `import`, `save`, `load`, `export` | An operation result with `ok` and `error`; import also includes `names`. Check `ok` before using imported data. |
+| `!world3d`: `import`, `save`, `load`, `export` | An operation result with `ok` and `error`; import also includes `names` and `preloaded` (0/1). Check `ok` before using imported data. |
 | `!world3d`: `animate` with `mode:list` or `mode:status` | A clip-name list or playback-status table. Other animation modes do not return a result. |
 | `!input`: `snapshot`, `keys` | The usual input table. Put requested keys after the action and before the arrow; omit the original table destination. |
 | `!input`: `key`, `mouse` | A table with numeric `down`, `pressed`, and `released` fields. The original separate output variables remain supported. |
@@ -396,15 +644,15 @@ compiled body. Use `!jump | retry |+|` within that body. Enter a function throug
 | `tick` | Seconds since the preceding frame resume | Frame-rate-independent game movement. |
 | `!media_time` result | Milliseconds on the OBS media playhead | Music cues and hit windows. |
 | `!animation` `duration` and `time` | Seconds | Choosing sprite frames. Do not append `ms` here. |
-| Renderer `width`, `height` | Output source pixels, 1–8192 each | `!renderer \| create`. |
-| Canvas `width`, `height`, `x`, `y`, `radius` | Buffer pixels; buffer dimensions 1–8192, up to 16 million total pixels | `!canvas`, `!sprite`, `!animation`. The origin is at the top left; x increases rightward, y downward. |
+| Renderer `width`, `height` | Output source pixels, 1Ã¢â‚¬â€œ8192 each | `!renderer \| create`. |
+| Canvas `width`, `height`, `x`, `y`, `radius` | Buffer pixels; buffer dimensions 1Ã¢â‚¬â€œ8192, up to 16 million total pixels | `!canvas`, `!sprite`, `!animation`. The origin is at the top left; x increases rightward, y downward. |
 | OBS source `pos`, `size`, `width`, `height` | OBS scene canvas pixels | Source methods and movement commands. These can differ from buffer pixels. |
 | 3D `x`, `y`, `z`, box `width`, `height`, `depth`, mesh vertices | World units; positive x is right, positive y is up, and **negative z is in front of the default camera** | `!world3d`. These are not OBS or canvas pixels. |
 | 3D `yaw`, `pitch`, `roll`, camera `fov` | Degrees | `!world3d`; `fov` is vertical field of view. |
-| `red`, `green`, `blue` (`r`, `g`, `b`) | Integer channel intensity, 0–255 | Canvas colors and source color effects. |
-| `interpolation` (`alpha`) | 0–1 | `!canvas \| rectangles` old/current-position blending. |
+| `red`, `green`, `blue` (`r`, `g`, `b`) | Integer channel intensity, 0Ã¢â‚¬â€œ255 | Canvas colors and source color effects. |
+| `interpolation` (`alpha`) | 0Ã¢â‚¬â€œ1 | `!canvas \| rectangles` old/current-position blending. |
 | `scale` on renderer | Scene-item multiplier, above 0 through 32 | `!renderer \| create`. |
-| `scale` on canvas text | Whole font-pixel multiplier, 1–8 | `!canvas \| text`. |
+| `scale` on canvas text | Whole font-pixel multiplier, 1Ã¢â‚¬â€œ8 | `!canvas \| text`. |
 | `rot` | Degrees | OBS source rotation. |
 
 The duration parser recognizes `s`, `mi`, and `hr`; other/no suffixes are treated as milliseconds. It reads a nonnegative numeric portion. Use explicit units for readability. OBS's own FPS counter and a program's animation rate are different: the scene can still render at 60 FPS while a script updates its picture only a few times per second.
@@ -447,7 +695,7 @@ per call rather than mixing positional and named arguments.
 !canvas | update |+|
 ```
 
-`!canvas | update` is the public readable name for the older `present` action. It publishes a complete copy of the current drawing pixels for the next OBS render. Drawing after that command changes only the working buffer: the preview and projectors keep showing the last published image until another `update`. This prevents incomplete UI redraws from flashing on screen when drawing spans several script ticks. Repeated calls without changes do not copy pixels or force another upload. Each canvas keeps one additional RGBA buffer for its published image (width × height × 4 bytes), reused across updates. A `create` replaces that buffer, while `!canvas | use | name:View |+|` switches to an existing buffer **without clearing it**. Multiple renderers can therefore have separate buffers. `snapshot` remembers the selected buffer's working pixels, and `restore` copies them back; this is useful for an expensive static background under moving sprites. Canvas dimensions may be 1–8192 pixels per side, with a 16-million-pixel total limit.
+`!canvas | update` is the public readable name for the older `present` action. It publishes a complete copy of the current drawing pixels for the next OBS render. Drawing after that command changes only the working buffer: the preview and projectors keep showing the last published image until another `update`. This prevents incomplete UI redraws from flashing on screen when drawing spans several script ticks. Repeated calls without changes do not copy pixels or force another upload. Each canvas keeps one additional RGBA buffer for its published image (width Ãƒâ€” height Ãƒâ€” 4 bytes), reused across updates. A `create` replaces that buffer, while `!canvas | use | name:View |+|` switches to an existing buffer **without clearing it**. Multiple renderers can therefore have separate buffers. `snapshot` remembers the selected buffer's working pixels, and `restore` copies them back; this is useful for an expensive static background under moving sprites. Canvas dimensions may be 1Ã¢â‚¬â€œ8192 pixels per side, with a 16-million-pixel total limit.
 
 Drawing inside a function that has not selected its own canvas inherits the
 nearest caller's selection. This also applies to `!sprite | draw` and
@@ -464,14 +712,14 @@ that should remain hidden.
 | `!canvas \| fill` | `red`, `green`, `blue`, optional `opacity` | Fill the selected buffer with one color. `opacity:0` makes it transparent; the default is 255. |
 | `!canvas \| rectangle` | `x`, `y`, `width`, `height`, `red`, `green`, `blue` | Draw a filled rectangle. `x,y` is its top-left corner. |
 | `!canvas \| circle` | `x`, `y`, `radius`, `red`, `green`, `blue` | Draw a filled circle centered at `x,y`. Radius is in buffer pixels and must be 0 to 2048. |
-| `!canvas \| text` | `text`, `x`, `y`, `red`, `green`, `blue`; optional `scale`, `font` | Draw text at its top-left position. `font:classic` (default) uses a 3 × 5 bitmap; `font:readable` uses a clearer 5 × 7 bitmap. `scale` magnifies each font pixel; it defaults to 1 and must be a whole number from 1 to 8. |
+| `!canvas \| text` | `text`, `x`, `y`, `red`, `green`, `blue`; optional `scale`, `font` | Draw text at its top-left position. `font:classic` (default) uses a 3 Ãƒâ€” 5 bitmap; `font:readable` uses a clearer 5 Ãƒâ€” 7 bitmap. `scale` magnifies each font pixel; it defaults to 1 and must be a whole number from 1 to 8. |
 | `!canvas \| rectangles` | See below | Draw many filled rectangles from coordinate tables in one command. |
 | `!canvas \| update` | None | Send the finished buffer to the OBS renderer on its next render. Call this after drawing a frame. Repeating it with no pixel changes does not upload a new frame. |
 | `!canvas \| snapshot` / `restore` | None | Remember or restore the selected buffer pixels. |
 
 In named renderer/canvas calls, `w`/`h` mean `width`/`height`, `r`/`g`/`b` mean full color names, `renderer`/`source` mean `name`, and renderer `type` means `kind`. Canvas text also accepts `message` or `content` for `text`. Unknown, repeated, missing, or mixed positional/named fields are errors. Positional calls keep the documented action-first order.
 
-Both built-in canvas fonts contain uppercase `A`–`Z`, digits, spaces, and common punctuation for values and paths. For a menu, use `!canvas | text | font:readable | text:"SETTINGS" | x:10,y:20,scale:2,red:255,green:255,blue:255 |+|`. `font:classic` keeps existing scripts' text layout. For typography beyond these bitmap faces, use an OBS text source or a packed sprite. Circle radius is limited to 0–2048 buffer pixels.
+Both built-in canvas fonts contain uppercase `A`Ã¢â‚¬â€œ`Z`, digits, spaces, and common punctuation for values and paths. For a menu, use `!canvas | text | font:readable | text:"SETTINGS" | x:10,y:20,scale:2,red:255,green:255,blue:255 |+|`. `font:classic` keeps existing scripts' text layout. For typography beyond these bitmap faces, use an OBS text source or a packed sprite. Circle radius is limited to 0Ã¢â‚¬â€œ2048 buffer pixels.
 
 #### Drawing many rectangles
 
@@ -538,7 +786,7 @@ access. `!array.unpack` is an alias that takes the same attributes without the
 `!sprite | create` takes a name, width, height, a comma-separated palette, and
 base64 pixel bytes. Each pixel byte indexes the palette starting at zero.
 `transparent` leaves the current canvas pixel untouched; other entries are
-`#RRGGBB` colors. The number of pixel bytes must equal width × height. A sprite
+`#RRGGBB` colors. The number of pixel bytes must equal width Ãƒâ€” height. A sprite
 can have at most 256 palette entries and 65536 pixels.
 
 `!sprite | draw` paints the stored sprite at the specified top-left `x,y` on
@@ -654,7 +902,7 @@ If you delete the selected 3D renderer source in OBS while its program is runnin
 | `mesh` | Required `name`, `vertices`, `triangles` when creating or replacing geometry; optional `uvs`, `texture`, `image`, `mime`, `view`, `unlit`, `async`, `into`, and box transform/color fields | Create a custom triangle mesh, optionally textured. `view` binds a live camera-view texture. `async:true` prepares geometry across ticks and uploads it in packets. Default `async:false` retains the synchronous behavior. Async calls require both geometry fields. |
 | `instances` | Required `name`, `mesh`, `transforms`; optional `async`, `into` | Create or replace one batched mesh from repeated placements of an existing mesh's local geometry. Defaults to `async:true`. See the batching example below. |
 | `cancel` | `name` | Cancel an unfinished mesh/batch build or upload and keep the previous complete object. Does nothing if no build is pending. Mesh edit transactions use `edit` with `mode:cancel` instead. |
-| `import` | `path`, `name`; optional `x`, `y`, `z`, `scale`, `into` | Import an OBJ, glTF 2.0 (`.gltf`), or binary glTF (`.glb`) model. glTF animation clips are retained. Multiple material groups or mesh primitives become `name_1`, `name_2`, etc. `into:result` supplies `result.ok`, `result.error`, and `result.names`. Import validates all parts before changing the world. |
+| `import` | `path`, `name`; optional `x`, `y`, `z`, `scale`, `into` | Import an OBJ, glTF 2.0 (`.gltf`), or binary glTF (`.glb`) model. glTF animation clips are retained. Multiple material groups or mesh primitives become `name_1`, `name_2`, etc. `into:result` supplies `result.ok`, `result.error`, `result.names`, and `result.preloaded` (0/1; see [model preloading](#model-preloading)). Import validates all parts before changing the world. |
 | `animate` | `name`; optional `mode`, `clip`, `time`, `loop`, `speed`, `into` | Control clips of an imported glTF/GLB model. `mode:play` starts or restarts, `resume` continues after pause, `pause` holds the pose, `stop` restores the original pose, and `seek` sets a time in seconds. `list \| into:clips` returns clip names; `status \| into:state` returns clip, time, playing, loop, speed, pose_time, and pending. |
 | `list` | `into` | Put the selected world's object names into a 1-based table. |
 | `stats` | `into` or `->` | Copy statistics from the last completed render: `backend`, `instance_draws`, `instanced_objects`, `native_available`, `view_count`, and `view_ms`. See native instancing and camera-view textures below. |
@@ -1004,7 +1252,7 @@ A seek command remains immediate CPU work and cannot yield partway through
 one pose. GPU uploads and drawing also cost time; scheduling does not guarantee
 a particular frame rate.
 
-Object names may be literals (`name:Wheel` or `name:"Front Wheel"`) or a parenthesized variable/expression (`name:(selected_part)`). This lets scripts create and inspect parts whose names are chosen while the script runs. For example:
+Object names accept variables directly (`name:selected_part`), including table paths (`name:selection.name` or `name:names[index]`). An unquoted name uses the current variable value when that variable exists; otherwise it remains a literal such as `name:Wheel`. Quoted names are always literal, so use `name:"Wheel"` if a variable named `Wheel` also exists. Variable values must be nonempty text or numbers; other types report errors. Table paths follow normal expression rules, including returning 0 for a missing table field. Parenthesized expressions such as `name:("Part"..index)` and existing `name:(selected_part)` calls still work. OBS source selection also accepts direct variables; widget identifiers follow the separate identity rule described above. For example:
 
 ```text
 !world3d | list | into:parts |+|
@@ -1026,7 +1274,7 @@ Object names may be literals (`name:Wheel` or `name:"Front Wheel"`) or a parenth
 
 The script chooses each path; there is no fixed model file. A string variable also works as `path`. Relative paths use the selected main program's folder in File mode, or the engine Lua file's folder in Text/Input mode. `save` and `export` overwrite the chosen file. `load` checks the file before replacing the current world and keeps the renderer's current dimensions. Exported script names that contain punctuation or spaces are assigned safe aliases such as `ExportPart1`; `save` preserves the exact names. The engine's model format is distinct from OBJ and glTF. It preserves imported UVs and embedded images; an external texture path still needs its image file.
 
-3D positions and box sizes use **world units**. At zero camera rotation, x points right, y points up, and objects with negative z are in front of the camera. Angles and `fov` use degrees; colors use channel values from 0 to 255. `fov` must be 1–179 degrees, `near` must be positive and smaller than `far`, and dimensions must be positive. Coordinates, sizes, import scale, and clipping distances have no arbitrary ±1,000,000/10,000 caps; finite numbers and meaningful validation still apply. The GPU uses 32-bit floating point, so very large coordinates lose precision; a floating render origin is useful for large worlds. Named fields can be reordered and grouped with commas, as with canvas commands. Multiple worlds have independent cameras and objects. The renderer supports opaque colored or diffuse-textured triangles with simple face shading and uses OBS's graphics API.
+3D positions and box sizes use **world units**. At zero camera rotation, x points right, y points up, and objects with negative z are in front of the camera. Angles and `fov` use degrees; colors use channel values from 0 to 255. `fov` must be 1Ã¢â‚¬â€œ179 degrees, `near` must be positive and smaller than `far`, and dimensions must be positive. Coordinates, sizes, import scale, and clipping distances have no arbitrary Ã‚Â±1,000,000/10,000 caps; finite numbers and meaningful validation still apply. The GPU uses 32-bit floating point, so very large coordinates lose precision; a floating render origin is useful for large worlds. Named fields can be reordered and grouped with commas, as with canvas commands. Multiple worlds have independent cameras and objects. The renderer supports opaque colored or diffuse-textured triangles with simple face shading and uses OBS's graphics API.
 
 ### Shader renderer
 
@@ -1262,7 +1510,7 @@ removing/clearing its controls leaves no registered global commands behind.
 `!ui | create` adds/configures a locked pixel renderer named `name` (default
 `UI`). Its output fills the scene dimensions captured by the program's `screen`
 record. `width` and `height` specify the UI drawing resolution and default to
-`screen.width` and `screen.height`, or 960×540 when unavailable. Coordinates are
+`screen.width` and `screen.height`, or 960Ãƒâ€”540 when unavailable. Coordinates are
 in UI canvas pixels, with the origin at the top left. Preview/projector input
 follows the renderer's current OBS scene-item position, scale, alignment,
 rotation, flip, and crop. Moving or
@@ -1382,7 +1630,7 @@ override continues to win. `!ui | set` can change appearance at runtime.
 | `border_width` | Border thickness in UI pixels, default 1. Focus has at least a 2-pixel accent border. |
 | `radius` / `border_radius` | Corner radius in UI pixels, default 6. |
 | `padding` | Text/control inset in UI pixels, default 10. |
-| `font` / `font_family` | `readable` (5×7 glyphs, default) or `pixel` (3×5 glyphs). |
+| `font` / `font_family` | `readable` (5Ãƒâ€”7 glyphs, default) or `pixel` (3Ãƒâ€”5 glyphs). |
 | `scale` / `font_scale` | Whole glyph scale from 1 to 16, default 2. |
 | `font_size` | Pixel size from 1 to 112, rounded to the nearest available 7-pixel-based glyph scale. Prefer `scale` for exact bitmap sizing. |
 
@@ -1735,7 +1983,7 @@ For games that use right-button drag over OBS's preview or a **Preview Projector
 
 `!input | wheel | wheel_steps |+|` reads relative mouse-wheel movement while OBS has focus and the pointer is inside its main scene preview or focused Preview Projector after `!input | preview |+|`. Positive values mean wheel up; negative values mean wheel down; `0` means no new movement. Fractional values are possible on high-resolution wheels. Read it once per frame: each read consumes the accumulated movement. On Windows it uses the system DirectInput library through LuaJIT FFI, with no project DLL or Interact window. Wheel polling is not yet implemented on Linux or macOS, where this command returns `0`.
 
-Windows polls the focused OBS main window or Preview Projector; Linux/X11 polls the focused OBS window through the system X11 library. The engine no longer has a command that opens OBS Interact. `!input | viewport | View |+|` remains available if a user manually opens that source's Interact window in OBS. macOS polls Quartz key/button state and maps the main preview or a focused Preview Projector through an isolated Lua state on macOS's asynchronous main queue. It does not require Interact. Live macOS behavior remains unverified. A window cannot receive a key while another window owns keyboard focus. `!onpress | HotkeyName | pressed_label | optional_released_label |+|` is an alternative: it registers an OBS hotkey, which the user binds in OBS Settings → Hotkeys.
+Windows polls the focused OBS main window or Preview Projector; Linux/X11 polls the focused OBS window through the system X11 library. The engine no longer has a command that opens OBS Interact. `!input | viewport | View |+|` remains available if a user manually opens that source's Interact window in OBS. macOS polls Quartz key/button state and maps the main preview or a focused Preview Projector through an isolated Lua state on macOS's asynchronous main queue. It does not require Interact. Live macOS behavior remains unverified. A window cannot receive a key while another window owns keyboard focus. `!onpress | HotkeyName | pressed_label | optional_released_label |+|` is an alternative: it registers an OBS hotkey, which the user binds in OBS Settings Ã¢â€ â€™ Hotkeys.
 
 ### macOS input
 
@@ -1745,7 +1993,7 @@ and button state come from [Quartz Event Services](https://developer.apple.com/d
 OBS's preview geometry is read on its UI thread in an isolated Lua state;
 callbacks do not enter the running program's Lua state from another thread.
 
-Enable **OBS** under **System Settings → Privacy & Security → Input Monitoring**
+Enable **OBS** under **System Settings Ã¢â€ â€™ Privacy & Security Ã¢â€ â€™ Input Monitoring**
 when permission is denied, then restart OBS if macOS requests it. The engine
 checks permission without automatically opening a permission dialog. See
 [Apple's Input Monitoring instructions](https://support.apple.com/en-ca/guide/mac-help/mchl4cedafb6/mac).
@@ -1796,7 +2044,7 @@ has mocked Intel/Apple Silicon coverage; it still needs a live macOS OBS test.
 | `preview_menu` | `block` or `allow` | On Windows, suppress or restore right-click menus in the main preview and Preview Projector for a running game. |
 | `text` | `output_var` | Text typed since the previous read; backspace is returned as `\b`. Empty string means no new text. |
 
-Accepted key names are `A`–`Z`, `0`–`9`, `NUMPAD0`–`NUMPAD9`, `NUMPAD_DECIMAL`, `NUMPAD_ADD`, `NUMPAD_SUBTRACT`, `NUMPAD_MULTIPLY`, `NUMPAD_DIVIDE`, `NUMPAD_SEPARATOR`, `F1`–`F12`, `UP`, `DOWN`, `LEFT`, `RIGHT`, `HOME`, `END`, `DELETE`, `ENTER`, `SPACE`, `ESCAPE`, `TAB`, `BACKSPACE`, `SHIFT`, `CTRL`, `ALT`, `META`, `MOUSE_LEFT`, `MOUSE_RIGHT`, `MOUSE_MIDDLE`, `MOUSE_X1`, and `MOUSE_X2`. Aliases include `RETURN`, `ESC`, `CONTROL`, `CMD`/`COMMAND` (for `META`), `DEL` (for `DELETE`), `MOUSE1`–`MOUSE3`, `KP_0`–`KP_9`, and `NUMPAD_0`–`NUMPAD_9`. `ENTER` accepts either Enter key; `KP_ENTER` and `NUMPAD_ENTER` are aliases for it. Number-row keys and named keypad digits remain separate when polling.
+Accepted key names are `A`Ã¢â‚¬â€œ`Z`, `0`Ã¢â‚¬â€œ`9`, `NUMPAD0`Ã¢â‚¬â€œ`NUMPAD9`, `NUMPAD_DECIMAL`, `NUMPAD_ADD`, `NUMPAD_SUBTRACT`, `NUMPAD_MULTIPLY`, `NUMPAD_DIVIDE`, `NUMPAD_SEPARATOR`, `F1`Ã¢â‚¬â€œ`F12`, `UP`, `DOWN`, `LEFT`, `RIGHT`, `HOME`, `END`, `DELETE`, `ENTER`, `SPACE`, `ESCAPE`, `TAB`, `BACKSPACE`, `SHIFT`, `CTRL`, `ALT`, `META`, `MOUSE_LEFT`, `MOUSE_RIGHT`, `MOUSE_MIDDLE`, `MOUSE_X1`, and `MOUSE_X2`. Aliases include `RETURN`, `ESC`, `CONTROL`, `CMD`/`COMMAND` (for `META`), `DEL` (for `DELETE`), `MOUSE1`Ã¢â‚¬â€œ`MOUSE3`, `KP_0`Ã¢â‚¬â€œ`KP_9`, and `NUMPAD_0`Ã¢â‚¬â€œ`NUMPAD_9`. `ENTER` accepts either Enter key; `KP_ENTER` and `NUMPAD_ENTER` are aliases for it. Number-row keys and named keypad digits remain separate when polling.
 
 ```text
 !input | keys | controls | NUMPAD1 | NUMPAD_DECIMAL | ENTER |+|
@@ -1854,7 +2102,7 @@ GPU execution time. Single commands/native uploads still cannot yield midway.
 | Field | Meaning |
 | --- | --- |
 | `ready`, `ticks` | Numeric readiness flag and completed active tick count since Execute. |
-| `tick_ms`, `budget_ms`, `budget_percent` | Measured tick duration, its configured budget, and duration/budget × 100. Percent can exceed 100. |
+| `tick_ms`, `budget_ms`, `budget_percent` | Measured tick duration, its configured budget, and duration/budget Ãƒâ€” 100. Percent can exceed 100. |
 | `events_ms` | Input sampling, networking, observers, and event scheduling, excluding animation. |
 | `animation_ms`, `async_ms`, `main_ms` | Automatic animation, cooperative tasks, and main commands. |
 | `collision_ms`, `ui_ms`, `background_ms`, `cleanup_ms` | Collision work, UI rendering, deferred work, and end-of-program connection/input cleanup. |
@@ -2073,6 +2321,40 @@ Source methods include `!pos`, `!scale`, `!rot`, `!align`, `!bounds`, `!size`, `
 Some styling methods rely on source-specific OBS settings and may have no visible effect on other source types. For animations across several scene items, select several names with one `!use_sources` call; a compatible method is then applied to each.
 
 `!renderer | create` is the exception to manual source setup for graphics: it creates a named direct renderer item if absent and checks its type if present. Other OBS sources used by name must already exist unless a script explicitly clones/creates them through supported operations.
+
+### Creating and playing sounds
+
+Create a reusable OBS media source from an audio file, then play it by name:
+
+```text
+!sound | create | name:ClickSound,file:"audio/click.wav",volume:0.5,monitor:true |+|
+!sound | ClickSound | play |+|
+!sound | ClickSound | volume | 0.25 |+|
+!sound | ClickSound | stop |+|
+!sound | delete | ClickSound |+|
+```
+
+Creation accepts `name`, `file`, optional `volume` (0Ã¢â‚¬â€œ1, default 0.5), and
+`monitor` (boolean, default false), grouped or separated by pipes. Relative
+file paths follow the main program directory in File output mode and the engine
+directory in Text/Input mode. The file must exist. OBS's bundled media source
+decodes the audio; no additional library is installed.
+
+`monitor:true` sends sound to OBS's configured monitoring device **and** stream/
+recording output. Configure that device in OBS audio settings. `monitor:false`
+sends it to output without local monitoring. Avoid capturing the monitoring
+device again through Desktop Audio if that would duplicate the sound.
+
+Creation adds an audio media-source item to the active scene, initially stopped.
+`play` restarts the clip; replaying the same source interrupts its previous clip.
+Separate sources can overlap. Repeating creation with the same name and audio
+file reuses the source; a different type or file is rejected. Saved media
+sources already in the scene are borrowed without replacing their settings or
+scene items. Playback volume and monitoring are temporarily applied and restored
+on cleanup. `delete` releases this program's sound record, removing only scene
+items it created. Stop All, Execute, and engine unload stop sounds and release
+their scene-item and source references. Existing sound-source
+play/pause/stop/volume calls remain supported.
 
 ## Tasks and workers
 
@@ -2798,12 +3080,13 @@ modules you trust.
 
 ## Command reference
 
-This index covers the engine's public command families. `[…]` means optional; `name`/`label` are programmer-chosen identifiers. `|+|` ends each statement, even when omitted from a compact signature below. Internal compiler commands beginning `__` are not program APIs. A module may register additional commands, but those are not part of the core language.
+This index covers the engine's public command families. `[Ã¢â‚¬Â¦]` means optional; `name`/`label` are programmer-chosen identifiers. `|+|` ends each statement, even when omitted from a compact signature below. Internal compiler commands beginning `__` are not program APIs. A module may register additional commands, but those are not part of the core language.
 
 ### State, flow, and diagnostics
 
 | Command | Form / effect |
 | --- | --- |
+| `!!engine` | `on_scene_change`, `on_focus_loss`, `on_error`, `budget`, `diagnostics`, `preload`, `restart`, `stop`. See [engine super commands](#engine-super-commands). |
 | `!var` | `name_or_type_name \| value`; assignment, including fields such as `player.x`. Add `local` for a local name. |
 | `!save`, `!load` | `name`; `name \| fallback`. OBS-settings persistence for scalar values. |
 | `!log` | `message_or_expression`; write to OBS log. Literal messages can interpolate `(variable)` in fallback text. |
@@ -2826,7 +3109,7 @@ This index covers the engine's public command families. `[…]` means optional; 
 | `!renderer` | `create \| name \| pixel_or_shader_or_3d \| width \| height \| [scale]` positionally, or `create \| name:... \| kind:pixel_or_shader_or_3d \| width:... \| height:...`; create/configure a direct renderer. Older `ensure` works. |
 | `!switch`, `!transition` | `scene_name`; `scene_name \| [transition_name] \| [duration]`; switch OBS scenes. |
 | `!media`, `!media_wait`, `!media_time` | `source \| play/pause/restart/stop/seek \| [time]`; `source \| absolute_time`; `source \| destination_ms`. |
-| `!sound` | `source \| play/pause/stop` or `source \| volume \| value \| [duration]`; control a media source. |
+| `!sound` | `create \| name:...,file:...,volume:...,monitor:...`; `delete \| owned_name`; `source \| play/pause/stop`; `source \| volume \| value \| [duration]`. See [sound creation](#creating-and-playing-sounds). |
 | `!move`, `!path`, `!spiral`, `!fade` | `key:value,... \| duration \| [easing]`; `control_x:y \| end_x:y \| duration \| [easing]`; `center_x:y \| radius \| rotations \| duration \| [easing]`; `opacity \| duration \| [easing]`. Apply to selected source(s). |
 | `!shake`, `!camera_shake`, `!glitch` | `intensity \| duration`; shake/jitter the selected item, then restore it. |
 | `!rainbow`, `!breathing`, `!dvd`, `!sway` | `speed \| duration`; procedural selected-source effects. Zero duration means they keep running. |
@@ -2852,7 +3135,7 @@ This index covers the engine's public command families. `[…]` means optional; 
 | --- | --- |
 | `!ui` | Persistent `frame`/`panel`/`box`, `label`, `button`, `input`, `checkbox`, `slider`, `tabs`; named styles/CSS declarations, bindings, listeners, getters, and cleanup. `use \| canvas_name` selects an existing UI canvas. See [UI controls](#ui-controls). |
 | `!input` | `press/release/hold \| key \| { ... }`, `remove \| key`, `clear \| all`; also `key`, `mouse`, `pointer`, `recenter`, `wheel`, `focus`, `status`, `snapshot`, `keys`, `text`, `preview`, `preview_menu`, `viewport`. Older `off` works. See [input](#input-and-timing). |
-| `!runtime` | `stats` or `timings`, followed by `-> \| variable` or `into:variable`; read resource counts or completed tick/job timing snapshots. See [runtime diagnostics](#runtime-diagnostics). |
+| `!runtime` | `stats`, `timings`, `diagnostics`, or `preload`, followed by `-> \| variable` or `into:variable`; read resource counts, completed tick/job timings, command profiles, or preload metadata. See [runtime diagnostics](#runtime-diagnostics) and [model preloading](#model-preloading). |
 | `!events` | `clear \| all`, or `remove \| family \| [selector] \| [event_kind]`; remove block handlers. Older `off` works. See [event handlers](#event-handlers). |
 | `!projector` | `fullscreen \| [monitor:index]`; Windows `controls \| escape:game/default,exit_key:F11` and `close`; configurable game/projector keys and focused-projector closure. |
 | `!onpress` | `hotkey_name \| press_label \| [release_label]`; register an OBS hotkey and callbacks. |
@@ -2901,7 +3184,7 @@ positions. It returns a fresh record and does not modify either input.
 | Returned field | Meaning |
 | --- | --- |
 | `hit` | `1` if the swept circles overlap or touch, otherwise `0`. |
-| `time` | First contact as a fraction of the step (`0`–`1`); `0` when already touching/overlapping, `1` on a miss. |
+| `time` | First contact as a fraction of the step (`0`Ã¢â‚¬â€œ`1`); `0` when already touching/overlapping, `1` on a miss. |
 | `normal_x`, `normal_y`, `normal_z` | Contact unit normal pointing from the second circle towards the first. Unused axes are zero; coincident centres use positive X. Zero on a miss. |
 | `penetration` | Nonnegative separation needed along the contact normal to keep the end positions on their original sides. It can stay positive after a complete crossing, or be zero for a tangent or circles already separating. |
 | `correction_x`, `correction_y`, `correction_z` | Half that overlap along the normal. For equal sharing, add this vector to the first circle and subtract it from the second. Zero on a miss. |
