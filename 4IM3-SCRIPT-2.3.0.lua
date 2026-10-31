@@ -316,6 +316,7 @@ function redact_network_credentials(value)
 end
 
 function generate_stack_trace(src, thread_name, queue, labels, call_stack, curr_idx, curr_ctx, err_msg)
+    if src and src.engine_scene_interrupted then return end
     local clean_err = tostring(err_msg)
     clean_err = clean_err:gsub('%[string "return .-"%]:%d+: ', '')
 
@@ -384,6 +385,33 @@ function generate_stack_trace(src, thread_name, queue, labels, call_stack, curr_
         end
     end
     obslua.script_log(obslua.LOG_WARNING, redact_network_credentials(trace))
+    if src and (src.engine_on_error=='reset' or src.engine_on_error=='stop') then
+        src.engine_control_pending=src.engine_on_error
+    end
+end
+
+-- Shared value semantics for arguments that historically accepted bare text.
+-- Declaration/destination names must not pass through this resolver.
+function resolve_command_value(ctx,raw)
+    if type(raw)~='string' then return raw end
+    local text=raw:match('^%s*(.-)%s*$')
+    if text:match('^".*"$') or text:match("^'.*'$") then return text:sub(2,-2) end
+    if text:match('^%b()$') then return resolve_path(ctx,text) end
+    local root=text:match('^([A-Za-z_][%w_]*)$') or
+        text:match('^([A-Za-z_][%w_]*)%.') or text:match('^([A-Za-z_][%w_]*)%[')
+    local scope,value
+    if root and retrieve_scope then scope,value=retrieve_scope(ctx and ctx.active_scope,root) end
+    if scope then
+        if text==root then return value end
+        return resolve_path(ctx,text)
+    end
+    return text
+end
+function resolve_command_text(ctx,raw)
+    local value=resolve_command_value(ctx,raw)
+    if type(value)=='table' and value._is_fatal_error then return nil,tostring(value.msg) end
+    if type(value)~='string' and type(value)~='number' then return nil,'Expected text or a number' end
+    return tostring(value)
 end
 
 function parse_value(src, current_val, input_value)
@@ -1024,9 +1052,12 @@ function step_thread_task(src, task, max_ops, deadline_ms)
             break
         end
 
+        local profile_start=src.engine_diagnostics_enabled and engine_tick_now_ms() or nil
         local success, result, target = with_thread_context(src, task, function()
             return func(src, task.state)
         end)
+        if profile_start then engine_diagnostics_record(src,func,task.queue,task.current_idx,task,profile_start,success,result,target) end
+        if src.engine_control_pending or src.engine_scene_interrupted then return true end
 
         if task.cancelled then
             return false
@@ -1305,6 +1336,10 @@ function compile_line(cmd, args)
 
     cmd = safe_trim(cmd)
     args = args or {}
+    if cmd:sub(1,1)=='!' then
+        if cmd~='!engine' then return function() return false,'Super Command Error: Unknown !!'..cmd:sub(2) end end
+        return engine_super_compile(args)
+    end
 
     -- Normalize optional result destinations once, when compiling. The normal
     -- no-arrow execution path keeps its existing argument and tick costs.
@@ -1338,7 +1373,7 @@ function compile_line(cmd, args)
                 if cmd=="connection" or cmd=="websocket" or cmd=="network" then
                     if ({addresses=true,invite=true,decode=true,send=true,receive=true,status=true})[action] then field="into" end
                 elseif cmd=="clipboard" and (action=="copy" or action=="paste") then field="into"
-                elseif cmd=="runtime" and (action=="stats" or action=="timings") then field="into"
+                elseif cmd=="runtime" and (action=="stats" or action=="timings" or action=="diagnostics" or action=="preload") then field="into"
                 elseif cmd=="ui" and (action=="get" or action=="value" or action=="state") then field="into"
                 elseif cmd=="physics" and action=="step" then field="into"
                 elseif cmd=="world3d" then
@@ -2876,12 +2911,12 @@ engine["source"] = function(src, state, args)
 
     for _, input in ipairs(args) do
         -- print("[source] input: " .. tostring(input))
-        local resolved = resolve_path(src, input)
+        local resolved = resolve_command_value(src, input)
         -- print("[source] source-resolved: " .. tostring(resolved))
         -- IMPORTANT:
         -- if resolve_path fails or returns nil for a bare source name,
         -- fall back to the raw source name instead of stopping.
-        if not (resolved and resolved.data) or is_fatal(resolved) or resolved == nil then
+        if is_fatal(resolved) or resolved == nil then
             -- print("[source] did-check: " .. tostring(resolved.data) .. " is error: " .. tostring(is_fatal(resolved)))
             resolved = input
         end
@@ -2901,6 +2936,7 @@ engine["source"] = function(src, state, args)
         end
     end
     if #missing_sources > 0 then
+        if src.engine_scene_interrupted then return false end
         local scene_name = "unknown"
         local ok, current_name = pcall(function()
             return obs.scene:name()
@@ -4412,7 +4448,8 @@ local raymaze_source_info = {
 local shader_worlds = {}
 local shader_selection_serial = 0
 local function shader_asset_path(raw,kind,ctx)
-    local path=tostring(raw or "")
+    local path,problem=resolve_command_text(ctx,raw or "")
+    if not path then return nil,problem end
     if path:sub(1,5)=="file:" then path=path:sub(6) end
     if path=="" then return nil,"Missing "..kind.." path" end
     if not path:match("^%a:[/\\]") and not path:match("^[/\\]") then
@@ -4441,7 +4478,8 @@ engine["shader"] = function(ctx,state,args)
     if tostring(args[1] or "")~="select" then
         return false,"Shader Error: Expected select | source_name | effect_path | optional_texture_path"
     end
-    local name=tostring(args[2] or "")
+    local name,problem=resolve_command_text(ctx,args[2] or "")
+    if not name then return false,'Shader Error: '..problem end
     if name=="" then return false,"Shader Error: Missing renderer source name" end
     local selection,err=shader_selection(args[3],args[4],ctx)
     if not selection then return false,"Shader Error: "..err end
@@ -5704,14 +5742,16 @@ engine["renderer"] = function(ctx, state, args)
     local normalized, named_error = normalize_graphics_arguments(args, "renderer_ensure")
     if not normalized then return fail(named_error) end
     args = normalized
-    local name = tostring(args[2] or "")
+    local name,problem = resolve_command_text(ctx,args[2] or "")
+    if not name then return fail(problem) end
     if name == "" then return fail("Missing source name") end
     local kinds = {
         shader = shader_source_info.id,
         pixel = raymaze_source_info.id,
         ["3d"] = world3d_source_info.id,
     }
-    local kind = tostring(args[3] or "")
+    local kind,kind_error = resolve_command_text(ctx,args[3] or "")
+    if not kind then return fail(kind_error) end
     local source_id = kinds[kind]
     if not source_id then return fail("Unknown renderer kind '" .. kind .. "'") end
     local function number(raw, label)
@@ -5742,6 +5782,10 @@ engine["renderer"] = function(ctx, state, args)
         return fail("Dimensions must be whole numbers from 1 to 8192; scale must be above 0 and at most 32")
     end
     local scene_source = obslua.obs_frontend_get_current_scene()
+    if engine_scene_observe and not engine_scene_observe(ctx,scene_source) then
+        if scene_source then obslua.obs_source_release(scene_source) end
+        return false
+    end
     if not scene_source then return fail("No active scene") end
     local scene_name = obslua.obs_source_get_name(scene_source)
     local scene = obslua.obs_scene_from_source(scene_source)
@@ -5995,18 +6039,9 @@ local function world3d_mesh_geometry(ctx, vertex_raw, triangle_raw,checkpoint,re
 end
 local function world3d_name(ctx, raw)
     if raw == nil or raw == "" then return nil, "Missing object name" end
-    local value = raw
-    if raw:match('^".*"$') or raw:match("^'.*'$") then
-        value=raw:sub(2,-2)
-    elseif raw:match("^%b()$") then
-        value = resolve_path(ctx, raw)
-        if is_fatal(value) then return nil, tostring(value.msg) end
-    end
-    if type(value) ~= "string" and type(value) ~= "number" then
-        return nil, "Object name must resolve to text or a number"
-    end
-    value = tostring(value)
-    if value == "" or #value > 256 then return nil, "Object name must have 1 to 256 bytes" end
+    local value,why=resolve_command_text(ctx,raw)
+    if not value then return nil,why end
+    if value=='' or #value>256 then return nil,'Object name must have 1 to 256 bytes' end
     return value
 end
 local function world3d_copy(value)
@@ -6015,8 +6050,13 @@ local function world3d_copy(value)
     for key, item in pairs(value) do
         -- A suspended pose owns references to its original world and buffers.
         -- Restored snapshots rebuild pending poses instead of sharing a coroutine.
-        if key~="animation_job" and tostring(key):sub(1,6)~="_mesh_" and key~="mesh_jobs" then
-            copy[key] = world3d_copy(item)
+        -- Numeric geometry entries cannot be bookkeeping fields. Keep sparse
+        -- keys intact with pairs, and copy scalar entries without recursive
+        -- calls or allocating a string for each vertex coordinate/index.
+        if type(key)~="string" or
+           (key~="animation_job" and key~="mesh_jobs" and key:sub(1,6)~="_mesh_") then
+            if type(item)=="table" then copy[key]=world3d_copy(item)
+            else copy[key]=item end
         end
     end
     return copy
@@ -7540,6 +7580,136 @@ local function world3d_gltf(path, content)
     if #result==0 then error("glTF scene has no triangle meshes") end
     return result,model
 end
+-- Explicit, program-owned CPU model templates. Normal imports stay uncached.
+local function world3d_preload_model_instance(definition)
+    if not definition then return nil end
+    -- Definitions are engine-owned and read-only after preload publication.
+    -- Playback/job/completion state lives on this private model record. Binding
+    -- names must also be private because importing/renaming a part writes them.
+    local model={}
+    for key,value in pairs(definition) do model[key]=value end
+    model.bindings={}
+    for i,binding in ipairs(definition.bindings) do
+        local private={}
+        for key,value in pairs(binding) do private[key]=value end
+        model.bindings[i]=private
+    end
+    model.pose_time=0
+    return model
+end
+local function world3d_preload_initial_pose(parts,definition)
+    if not definition or #definition.bindings==0 then return false end
+    local model=world3d_preload_model_instance(definition)
+    local world={objects={},version=0}
+    for i,part in ipairs(parts) do
+        world.objects[i]={vertices=part.vertices,geometry_version=1}
+    end
+    for _,binding in ipairs(model.bindings) do
+        binding.name=binding.part
+        local skin=binding.skin and model.skins[binding.skin]
+        if skin then
+            for vertex_index,joint_ids in ipairs(binding.joints) do
+                for i=1,4 do
+                    if binding.joint_weights[vertex_index][i]>0 and not skin.joints[joint_ids[i]+1] then
+                        error('glTF skin references missing joint')
+                    end
+                end
+            end
+        end
+    end
+    -- Uses the same pose calculation as an ordinary import, but with temporary
+    -- CPU objects: no renderer, GPU buffers or globally published world exists.
+    world3d_animation_apply(world,model,nil,0)
+    for i,part in ipairs(parts) do part.vertices=world.objects[i].vertices end
+    return true
+end
+local function world3d_preload_key(path)
+    path=path:gsub("\\","/")
+    local prefix=path:match("^%a:/") or (path:sub(1,2)=="//" and "//") or (path:sub(1,1)=="/" and "/") or ""
+    local parts={}
+    for part in path:sub(#prefix+1):gmatch("[^/]+") do
+        if part==".." and #parts>0 and parts[#parts]~=".." then table.remove(parts)
+        elseif part~="." then parts[#parts+1]=part end
+    end
+    local key=prefix..table.concat(parts,"/")
+    return host_os=="Windows" and key:lower() or key
+end
+function engine_preload_models(ctx,paths,mode)
+    local owner=ctx.native_worker_program or ctx
+    if mode=='clear' then owner.model_preloads=nil;return true end
+    local resolved,seen={},{}
+    for _,raw in ipairs(paths) do
+        if type(raw)~='string' then return false,'Preload Error: Expected quoted paths or string variables' end
+        local path,why=world3d_file_path(ctx,raw)
+        if not path then return false,'Preload Error: '..tostring(why) end
+        local key=world3d_preload_key(path)
+        local extension=path:match('%.([^./\\]+)$')
+        extension=extension and extension:lower()
+        if extension~='obj' and extension~='gltf' and extension~='glb' then return false,'Preload Error: Expected .obj, .gltf, or .glb: '..path end
+        if not seen[key] then resolved[#resolved+1]={path=path,key=key,format=extension};seen[key]=true end
+    end
+    local store=owner.model_preloads or {entries={},hits=0,parses=0,prepare_ms=0,copy_ms=0}
+    if mode=='release' then
+        for _,item in ipairs(resolved) do store.entries[item.key]=nil end
+        return true
+    end
+    local pending={};local elapsed=0;local parsed_count=0
+    for _,item in ipairs(resolved) do
+        if mode=='reload' or not store.entries[item.key] then
+            local started=engine_tick_now_ms and engine_tick_now_ms() or os.clock()*1000
+            local content,why=world3d_read_asset(item.path)
+            if not content then return false,'Preload Error: '..item.path..': '..tostring(why) end
+            local ok,parts,model,initial_pose_ready=pcall(function()
+                if item.format=='obj' then return world3d_obj(item.path,content) end
+                local parsed,definition=world3d_gltf(item.path,content)
+                local ready=world3d_preload_initial_pose(parsed,definition)
+                return parsed,definition,ready
+            end)
+            if not ok then return false,'Preload Error: '..item.path..': '..tostring(parts) end
+            local vertices,triangles=0,0
+            for _,part in ipairs(parts) do vertices=vertices+#part.vertices;triangles=triangles+#part.triangles/3 end
+            item.parts,item.model=parts,model
+            item.initial_pose_ready=initial_pose_ready==true
+            item.root_bytes=#content;item.vertices=vertices;item.triangles=triangles
+            item.prepare_ms=math.max(0,(engine_tick_now_ms and engine_tick_now_ms() or os.clock()*1000)-started)
+            pending[item.key]=item;elapsed=elapsed+item.prepare_ms;parsed_count=parsed_count+1
+        end
+    end
+    -- Publish only after every requested asset has parsed successfully.
+    for key,item in pairs(pending) do store.entries[key]=item end
+    store.parses=store.parses+parsed_count;store.prepare_ms=store.prepare_ms+elapsed
+    owner.model_preloads=store
+    return true
+end
+function engine_preload_snapshot(ctx)
+    local owner=ctx.native_worker_program or ctx
+    local store=owner.model_preloads or {}
+    local result={models=0,hits=store.hits or 0,parses=store.parses or 0,
+        prepare_ms=store.prepare_ms or 0,copy_ms=store.copy_ms or 0,root_bytes=0,assets={}}
+    for _,item in pairs(store.entries or {}) do
+        result.models=result.models+1;result.root_bytes=result.root_bytes+item.root_bytes
+        result.assets[#result.assets+1]={path=item.path,format=item.format,parts=#item.parts,
+            vertices=item.vertices,triangles=item.triangles,root_bytes=item.root_bytes,prepare_ms=item.prepare_ms}
+    end
+    table.sort(result.assets,function(a,b) return a.path<b.path end)
+    return result
+end
+local function world3d_preload_fetch(ctx,path)
+    local owner=ctx.native_worker_program or ctx
+    local store=owner.model_preloads
+    local entry=store and store.entries[world3d_preload_key(path)]
+    if not entry then return nil end
+    local started=engine_tick_now_ms and engine_tick_now_ms() or os.clock()*1000
+    -- Geometry/UVs/indices and animation definitions are immutable assets.
+    -- Editor commands already copy staged geometry before writing, and animation
+    -- replaces a complete vertex array. Detached get/snapshot results still use
+    -- world3d_copy, so scripts cannot obtain a writable alias to these arrays.
+    local instance={parts=entry.parts,model=world3d_preload_model_instance(entry.model),
+        initial_pose_ready=entry.initial_pose_ready}
+    store.hits=store.hits+1
+    store.copy_ms=store.copy_ms+math.max(0,(engine_tick_now_ms and engine_tick_now_ms() or os.clock()*1000)-started)
+    return instance
+end
 -- Validate the complete scene update first, then publish object and camera
 -- transforms together. An animated import name addresses all of its parts.
 function world3d_apply_updates(ctx,world,rows,camera)
@@ -7891,6 +8061,11 @@ engine["world3d"] = function(ctx, state, args)
         fields, parse_error = world3d_parse_fields(args, allowed, action)
         if not fields then return false, "World3D Error: " .. parse_error end
     end
+    if fields.mode and resolve_command_text then
+        local value,why=resolve_command_text(ctx,fields.mode)
+        if not value then return false,'World3D Error: '..why end
+        fields.mode=value
+    end
     local publish = fields.into and function(value)
         local written=update_variable_state(ctx,fields.into,value)
         if is_fatal(written) then return false,written.msg end
@@ -8210,10 +8385,11 @@ engine["world3d"] = function(ctx, state, args)
         return publish(hit)
     end
     if action == "import" then
+        local preloaded=false
         local function import_result(ok, message, names)
             if fields.into then
                 return publish(
-                    {ok=ok and 1 or 0,error=message or "",names=names or {}})
+                    {ok=ok and 1 or 0,error=message or "",names=names or {},preloaded=preloaded and 1 or 0})
             end
             return ok, message
         end
@@ -8237,13 +8413,20 @@ engine["world3d"] = function(ctx, state, args)
         if placement.scale and placement.scale<=0 then
             return import_result(false,"World3D Error: scale must be above 0")
         end
-        local content,read_error=world3d_read_asset(path)
-        if not content then return import_result(false,"World3D Error: " .. read_error) end
-        local parsed,parts,model=pcall(function()
-            if extension=="obj" then return world3d_obj(path,content) end
-            return world3d_gltf(path,content)
-        end)
-        if not parsed then return import_result(false,"World3D Error: " .. tostring(parts)) end
+        local cached=world3d_preload_fetch(ctx,path)
+        local initial_pose_ready=cached and cached.initial_pose_ready
+        local parts,model
+        if cached then parts,model=cached.parts,cached.model;preloaded=true
+        else
+            local content,read_error=world3d_read_asset(path)
+            if not content then return import_result(false,"World3D Error: " .. read_error) end
+            local parsed
+            parsed,parts,model=pcall(function()
+                if extension=="obj" then return world3d_obj(path,content) end
+                return world3d_gltf(path,content)
+            end)
+            if not parsed then return import_result(false,"World3D Error: " .. tostring(parts)) end
+        end
         if world.animations and world.animations[name] then
             return import_result(false,"World3D Error: Animated model '"..name.."' already exists")
         end
@@ -8261,7 +8444,7 @@ engine["world3d"] = function(ctx, state, args)
             world.objects[names[i]]={kind="mesh",vertices=part.vertices,
                 triangles=part.triangles,uvs=part.uvs,
                 texture_path=part.texture_path,texture_bytes=part.texture_bytes,
-                texture_mime=part.texture_mime,geometry_version=1,
+                texture_mime=part.texture_mime,geometry_version=initial_pose_ready and 2 or 1,
                 x=placement.x or 0,y=placement.y or 0,z=placement.z or 0,
                 width=placement.scale or 1,height=placement.scale or 1,
                 depth=placement.scale or 1,visible=1,yaw=0,pitch=0,roll=0,
@@ -8272,7 +8455,7 @@ engine["world3d"] = function(ctx, state, args)
             for _,binding in ipairs(model.bindings) do
                 binding.name=names[binding.part]
                 local skin=binding.skin and model.skins[binding.skin]
-                if skin then
+                if skin and not initial_pose_ready then
                     for vertex_index,joint_ids in ipairs(binding.joints) do
                         for i=1,4 do
                             if binding.joint_weights[vertex_index][i]>0 and
@@ -8287,7 +8470,7 @@ engine["world3d"] = function(ctx, state, args)
             end
             world.animations=world.animations or {}
             world.animations[name]=model
-            if #model.bindings>0 then
+            if #model.bindings>0 and not initial_pose_ready then
                 local ok,why=pcall(world3d_animation_apply,world,model,nil,0)
                 if not ok then
                     world.animations[name]=nil
@@ -8296,6 +8479,8 @@ engine["world3d"] = function(ctx, state, args)
                     return import_result(false,"World3D Error: "..tostring(why))
                 end
             end
+            -- Preserve the normal import's pose-publication version change.
+            if initial_pose_ready then world.version=world.version+1 end
             if not model.clip_order or #model.clip_order==0 then
                 world.animations[name]=nil
             end
@@ -9785,9 +9970,12 @@ input_projector_controls_command=function(ctx,args)
             fields[key]=value
         end
     end
-    local mode=(fields.escape or "game"):lower()
+    local mode,mode_error=resolve_command_text(ctx,fields.escape or "game")
+    if not mode then return false,'Projector Error: '..mode_error end
+    mode=mode:lower()
     if mode~="game" and mode~="default" then return false,"Projector Error: escape must be game or default" end
-    local raw=fields.exit_key or "F11"
+    local raw,key_error=resolve_command_text(ctx,fields.exit_key or "F11")
+    if not raw then return false,'Projector Error: '..key_error end
     if not input_name(raw) and raw:lower()~="none" then
         local value=resolve_path(ctx,raw)
         if type(value)=="string" then raw=value end
@@ -9849,7 +10037,8 @@ function INPUT_EVENTS.compile(ctx,args,line,command,cmd)
     if cmd=='input' then
         code.kind=INPUT_EVENTS.kinds[action] or ({pointer_move='move',mouse_move='move'})[action] or action
         if INPUT_EVENTS.kinds[action] then
-            code.key=input_name(args[2]);valid=valid and #args==3 and code.key~=nil
+            code.selector=args[2]
+            code.key=input_name(args[2]) or args[2];valid=valid and #args==3 and type(code.key)=='string' and code.key~=''
         elseif code.kind=='focus' then
             code.key=({gain='gained',gained='gained',lose='lost',lost='lost'})[args[2]]
             valid=valid and #args==3 and code.key~=nil
@@ -9864,10 +10053,10 @@ function INPUT_EVENTS.compile(ctx,args,line,command,cmd)
         code.key=tostring(code.target)..'|'..tostring(code.other);valid=valid and #args==3
     elseif cmd=='ui' then
         code.kind=action=='on' and args[3] or action
-        code.key=INPUT_EVENTS.selector(args[2]);code.target=code.key
+        code.key=INPUT_EVENTS.selector(args[2]);code.target=code.key;code.selector=code.key
         valid=valid and #args==(action=='on' and 4 or 3) and code.key~='' and ENGINE_UI.events[code.kind]
     else
-        code.key=INPUT_EVENTS.selector(args[2]);code.target=code.key
+        code.key=INPUT_EVENTS.selector(args[2]);code.target=code.key;code.selector=code.key
         valid=valid and #args==3 and code.key~=''
         if cmd=='connection' or cmd=='websocket' or cmd=='network' then
             code.family='connection';code.kind=({connected='join',disconnected='leave'})[action] or action
@@ -9902,6 +10091,22 @@ function INPUT_EVENTS.register(ctx,args,cmd)
         local err;code,err=INPUT_EVENTS.compile(ctx,args,nil,nil,cmd)
         if not code then return false,err end
         args._input_handler=code
+    end
+    if code.selector then
+        local ui=ctx.ui_state
+        local value=code.family=='ui' and ui and ui.widgets[code.selector] and code.selector or
+            resolve_command_value(ctx,code.selector)
+        if is_fatal(value) then return false,'Event Error: '..tostring(value.msg) end
+        -- Worker/connection records also live in variables bearing their ID.
+        -- Those records identify a resource; they are not replacement ID text.
+        if type(value)=='table' and code.family~='ui' and code.family~='input' then value=code.selector end
+        if type(value)~='string' and type(value)~='number' then return false,'Event Error: Expected a text selector' end
+        local bound={};for key,item in pairs(code) do bound[key]=item end;code=bound
+        code.key=tostring(value);code.target=code.key
+        if code.family=='input' then
+            code.key=input_name(code.key)
+            if not code.key then return false,'Input Error: Unknown input key '..tostring(value) end
+        end
     end
     if code.family=='input' then
         local history=ctx.input_event_poll or {};ctx.input_event_poll=history
@@ -10146,6 +10351,18 @@ for _,key in ipairs({
 engine["input"] = function(ctx,state,args)
     local action=tostring(args[1] or "")
     if args._input_handler or INPUT_EVENTS.is_handler('input',args) then return INPUT_EVENTS.register(ctx,args) end
+    local first,last
+    if action=='key' or action=='mouse' or action=='remove' or action=='clear' or action=='off' then first,last=2,2
+    elseif action=='snapshot' or action=='keys' then first,last=3,#args end
+    if first then
+        local expanded={};for key,value in pairs(args) do expanded[key]=value end
+        for i=first,last do
+            local value,why=resolve_command_text(ctx,args[i] or '')
+            if not value then return false,'Input Error: '..why end
+            expanded[i]=value
+        end
+        args=expanded
+    end
     if action=='status' then
         if #args~=2 or tostring(args[2])=='' then return false,'Input Error: Expected status | output_variable' end
         local value={platform=host_os,backend=host_os=='Windows' and 'win32' or host_os=='Linux' and 'x11' or 'unsupported',
@@ -10241,7 +10458,8 @@ engine["input"] = function(ctx,state,args)
         return true
     end
     if action=="viewport" then
-        local name=tostring(args[2] or "")
+        local name,problem=resolve_command_text(ctx,args[2] or "")
+        if not name then return false,'Input Error: '..problem end
         if name=="" then return false,"Input Error: Missing viewport source name" end
         local source=obslua.obs_get_source_by_name(name)
         if not source then return false,"Input Error: Source '"..name.."' was not found" end
@@ -10665,6 +10883,10 @@ engine["canvas"] = function(ctx,state,args)
     local function active_pixel_item(name)
         if state and state._ui_name==name and state._ui_item then return state._ui_item end
         local scene_source=obslua.obs_frontend_get_current_scene()
+        if engine_scene_observe and not engine_scene_observe(ctx,scene_source) then
+            if scene_source then obslua.obs_source_release(scene_source) end
+            return nil
+        end
         local scene=scene_source and obslua.obs_scene_from_source(scene_source)
         local item=scene and obslua.obs_scene_find_source(scene,name)
         local source=item and obslua.obs_sceneitem_get_source(item)
@@ -10679,7 +10901,8 @@ engine["canvas"] = function(ctx,state,args)
         return item
     end
     if action=="create" or action=="use" then
-        local name=tostring(args[2] or "")
+        local name,problem=resolve_command_text(ctx,args[2] or "")
+        if not name then return false,'Canvas Error: '..problem end
         if name=="" then return false,"Canvas Error: Missing renderer name" end
         local item,scene_error=active_pixel_item(name)
         if not item then return false,scene_error end
@@ -10898,7 +11121,14 @@ local packed_base64_values = {}
 for i = 1, #packed_base64_alphabet do
     packed_base64_values[packed_base64_alphabet:byte(i)] = i - 1
 end
-local function packed_literal(raw)
+local function packed_literal(raw,ctx)
+    if ctx and resolve_command_value then
+        local value=resolve_command_value(ctx,raw)
+        if not is_fatal(value) and (type(value)=='string' or type(value)=='number' or type(value)=='boolean') then
+            return tostring(value)
+        end
+        return '' -- Let the owning packed-data command report its validation error.
+    end
     if type(raw) ~= "string" then return tostring(raw or "") end
     local value = safe_trim(raw)
     local quote = value:sub(1, 1)
@@ -10907,8 +11137,8 @@ local function packed_literal(raw)
     end
     return value
 end
-local function packed_bytes(raw, encoding)
-    local data = packed_literal(raw)
+local function packed_bytes(raw, encoding,ctx)
+    local data = packed_literal(raw,ctx)
     if #data > 262144 then return nil, "Packed data exceeds 262144 characters" end
     local out = {}
     if encoding == "hex" then
@@ -10978,18 +11208,18 @@ engine["array"] = function(ctx, state, args)
         {"name", "type", "encoding", "data", "count"})
     if not fields then return false, "Array Error: " .. err end
     local name = packed_literal(fields.name)
-    local kind = packed_literal(fields.type)
-    local encoding = packed_literal(fields.encoding)
+    local kind = packed_literal(fields.type,ctx)
+    local encoding = packed_literal(fields.encoding,ctx)
     if name == "" or (kind ~= "u8" and kind ~= "u16") then
         return false, "Array Error: name and type:u8 or type:u16 are required"
     end
-    local bytes, decode_error = packed_bytes(fields.data, encoding)
+    local bytes, decode_error = packed_bytes(fields.data, encoding,ctx)
     if not bytes then return false, "Array Error: " .. decode_error end
     if kind == "u16" and #bytes % 2 ~= 0 then
         return false, "Array Error: u16 data needs an even byte count"
     end
     local count = kind == "u8" and #bytes or #bytes / 2
-    if fields.count ~= nil and tonumber(packed_literal(fields.count)) ~= count then
+    if fields.count ~= nil and tonumber(packed_literal(fields.count,ctx)) ~= count then
         return false, "Array Error: count does not match decoded data"
     end
     local values = {}
@@ -11031,9 +11261,9 @@ local function draw_packed_sprite(frame, sprite, x, y, pixel_offset)
     frame.dirty = true
 end
 
-local function packed_palette(raw)
+local function packed_palette(raw,ctx)
     if raw == nil then return nil, "palette is required" end
-    local palette_text = packed_literal(raw)
+    local palette_text = packed_literal(raw,ctx)
     local palette = {}
     for entry in (palette_text .. ","):gmatch("(.-),") do
         entry = safe_trim(entry)
@@ -11059,17 +11289,17 @@ engine["sprite"] = function(ctx, state, args)
         local fields, err = packed_fields(args, action,
             {"name", "width", "height", "palette", "pixels"})
         if not fields then return false, "Sprite Error: " .. err end
-        local name = packed_literal(fields.name)
-        local width, height = tonumber(packed_literal(fields.width)),
-                              tonumber(packed_literal(fields.height))
+        local name = packed_literal(fields.name,ctx)
+        local width, height = tonumber(packed_literal(fields.width,ctx)),
+                              tonumber(packed_literal(fields.height,ctx))
         if not name:match("^[%w_%-]+$") or #name > 80 or
            not width or not height or width % 1 ~= 0 or height % 1 ~= 0 or
            width < 1 or height < 1 or width * height > 65536 then
             return false, "Sprite Error: name and positive whole dimensions up to 65536 pixels are required"
         end
-        local palette, palette_error = packed_palette(fields.palette)
+        local palette, palette_error = packed_palette(fields.palette,ctx)
         if not palette then return false, "Sprite Error: " .. palette_error end
-        local pixels, decode_error = packed_bytes(fields.pixels, "base64")
+        local pixels, decode_error = packed_bytes(fields.pixels, "base64",ctx)
         if not pixels then return false, "Sprite Error: " .. decode_error end
         if #pixels ~= width * height then
             return false, "Sprite Error: pixel count does not match dimensions"
@@ -11086,7 +11316,7 @@ engine["sprite"] = function(ctx, state, args)
     elseif action == "draw" then
         local fields, err = packed_fields(args, action, {"name", "x", "y"})
         if not fields then return false, "Sprite Error: " .. err end
-        local name = packed_literal(fields.name)
+        local name = packed_literal(fields.name,ctx)
         local sprite = ctx.sprite_states and ctx.sprite_states[name]
         if not sprite then return false, "Sprite Error: Undefined sprite '" .. name .. "'" end
         local selected = resolve_canvas_selection(ctx)
@@ -11113,7 +11343,7 @@ engine["animation"] = function(ctx, state, args)
         local fields, err = packed_fields(args, action,
             {"name", "frames", "width", "height", "count", "palette", "pixels", "duration", "loop"})
         if not fields then return false, "Animation Error: " .. err end
-        local name = packed_literal(fields.name)
+        local name = packed_literal(fields.name,ctx)
         if not name:match("^[%w_%-]+$") or #name > 80 then
             return false, "Animation Error: name must contain only letters, numbers, _ or -"
         end
@@ -11122,7 +11352,7 @@ engine["animation"] = function(ctx, state, args)
             return false, "Animation Error: " .. tostring(duration_error or
                 "duration must be greater than 0 and at most 3600 seconds")
         end
-        local loop_text = fields.loop and packed_literal(fields.loop):lower() or "false"
+        local loop_text = fields.loop and packed_literal(fields.loop,ctx):lower() or "false"
         if loop_text ~= "true" and loop_text ~= "false" then
             return false, "Animation Error: loop must be true or false"
         end
@@ -11131,7 +11361,7 @@ engine["animation"] = function(ctx, state, args)
             if fields.pixels or fields.palette or fields.width or fields.height then
                 return false, "Animation Error: frames cannot be mixed with packed pixel fields"
             end
-            local frame_text = packed_literal(fields.frames)
+            local frame_text = packed_literal(fields.frames,ctx)
             if not frame_text:match("^%b[]$") then
                 return false, "Animation Error: frames needs [sprite_one, sprite_two, ...]"
             end
@@ -11141,28 +11371,28 @@ engine["animation"] = function(ctx, state, args)
                 return false, "Animation Error: frames needs 1 to 256 sprites"
             end
             for i, frame_name in ipairs(names) do
-                frame_name = packed_literal(frame_name)
+                frame_name = packed_literal(frame_name,ctx)
                 if not ctx.sprite_states or not ctx.sprite_states[frame_name] then
                     return false, "Animation Error: Undefined sprite '" .. frame_name .. "' at frame " .. i
                 end
                 names[i] = frame_name
             end
-            if fields.count and tonumber(packed_literal(fields.count)) ~= #names then
+            if fields.count and tonumber(packed_literal(fields.count,ctx)) ~= #names then
                 return false, "Animation Error: count does not match frames"
             end
             animation.kind, animation.frames, animation.count = "references", names, #names
         else
-            local width, height = tonumber(packed_literal(fields.width)),
-                tonumber(packed_literal(fields.height))
-            local count = tonumber(packed_literal(fields.count))
+            local width, height = tonumber(packed_literal(fields.width,ctx)),
+                tonumber(packed_literal(fields.height,ctx))
+            local count = tonumber(packed_literal(fields.count,ctx))
             if not width or not height or not count or width % 1 ~= 0 or
                 height % 1 ~= 0 or count % 1 ~= 0 or width < 1 or height < 1 or
                 count < 1 or count > 256 or width * height * count > 65536 then
                 return false, "Animation Error: positive whole width, height, and count are required (up to 65536 pixels total)"
             end
-            local palette, palette_error = packed_palette(fields.palette)
+            local palette, palette_error = packed_palette(fields.palette,ctx)
             if not palette then return false, "Animation Error: " .. palette_error end
-            local pixels, decode_error = packed_bytes(fields.pixels, "base64")
+            local pixels, decode_error = packed_bytes(fields.pixels, "base64",ctx)
             if not pixels then return false, "Animation Error: " .. decode_error end
             if #pixels ~= width * height * count then
                 return false, "Animation Error: pixel count does not match width * height * count"
@@ -11181,7 +11411,7 @@ engine["animation"] = function(ctx, state, args)
     elseif action == "draw" then
         local fields, err = packed_fields(args, action, {"name", "time", "x", "y"})
         if not fields then return false, "Animation Error: " .. err end
-        local name = packed_literal(fields.name)
+        local name = packed_literal(fields.name,ctx)
         local animation = ctx.animation_states and ctx.animation_states[name]
         if not animation then return false, "Animation Error: Undefined animation '" .. name .. "'" end
         local selected = resolve_canvas_selection(ctx)
@@ -11287,7 +11517,16 @@ function ENGINE_UI.attributes(ctx,args,first,allowed)
                     value=value==true or value==1
                 end
             elseif ENGINE_UI.words[key] or key=='into' then
-                value=raw:match('^"(.*)"$') or raw:match("^'(.*)'$") or raw
+                if key=='into' or key=='bind' then
+                    value=raw:match('^"(.*)"$') or raw:match("^'(.*)'$") or raw
+                elseif (key=='parent' or key=='tabs') and ctx.ui_state and ctx.ui_state.widgets[raw] or
+                       key=='style' and ctx.ui_state and ctx.ui_state.styles[raw] then
+                    value=raw
+                else
+                    local why
+                    value,why=resolve_command_text(ctx,raw)
+                    if not value then return nil,why end
+                end
             else
                 value=resolve_path(ctx,raw)
                 if is_fatal(value) then return nil,value.msg end
@@ -11939,7 +12178,8 @@ engine.ui=function(ctx,state,args)
     local ui=ctx.ui_state;if not ui then return fail('Create a UI first with !ui | create') end
     if action=='use' then
         if #args~=2 then return fail('Expected use | UI_canvas_name') end
-        local name=INPUT_EVENTS.selector(args[2])
+        local name,problem=resolve_command_text(ctx,INPUT_EVENTS.selector(args[2]))
+        if not name then return fail(problem) end
         for _,surface in ipairs(ui.surfaces) do
             if surface.name==name then ui.selected=surface;return true end
         end
@@ -11966,7 +12206,18 @@ engine.ui=function(ctx,state,args)
             height=ui.selected and ui.selected.height or 0})
         if is_fatal(result) then return fail(result.msg) end;return true
     end
-    local name=INPUT_EVENTS.selector(args[2]);if name=='' then return fail('Missing control name') end
+    local raw_name=INPUT_EVENTS.selector(args[2])
+    -- Widget/style declarations introduce identifiers, like !fn and !var.
+    -- An existing widget is addressed by that identifier even if script data
+    -- happens to use the same spelling. Only an alias without a widget ID is
+    -- evaluated as a value by the generic !ui forms.
+    local declaration=ENGINE_UI.kinds[action] or action=='style'
+    local name,problem
+    if declaration or ui.widgets[raw_name] then
+        name=raw_name:match('^"(.*)"$') or raw_name:match("^'(.*)'$") or raw_name
+    else name,problem=resolve_command_text(ctx,raw_name) end
+    if not name then return fail(problem) end
+    if name=='' then return fail('Missing control name') end
     if action=='style' then
         local allowed={font=true};for key in pairs(ENGINE_UI.defaults) do allowed[key]=true end
         local fields,why=ENGINE_UI.attributes(ctx,args,3,allowed);if not fields then return fail(why) end
@@ -16543,6 +16794,14 @@ engine["worker"] = function(ctx, state, args)
     end
     local action = worker_action_aliases[requested] or requested
     local name = safe_trim(tostring(args[2] or ""))
+    if resolve_command_value and ({start=true,read=true,cancel=true,release=true,clear=true})[action] and
+       name~='all' and name~='scope' and name~='program' then
+        local value=resolve_command_value(ctx,name)
+        if is_fatal(value) then return false,'Native Worker Error: '..tostring(value.msg) end
+        -- Job result records share their identifier with the owning worker.
+        -- A scalar alias can name a job; its result table is never an ID value.
+        if type(value)=='string' or type(value)=='number' then name=tostring(value) end
+    end
     if name == "" then return false, "Native Worker Error: missing job name" end
     if action~="read" and action~="cancel" and action~="release" and action~="clear" then
         local existing=program_ctx.native_workers and program_ctx.native_workers[name]
@@ -16792,8 +17051,8 @@ function runtime_tools.timings(ctx)
 end
 engine["runtime"] = function(ctx, state, args)
     local action=safe_trim(tostring(args[1] or '')):lower()
-    if action~='stats' and action~='timings' then
-        return false,"Runtime Error: Expected stats or timings | into:variable or -> | variable"
+    if action~='stats' and action~='timings' and action~='diagnostics' and action~='preload' then
+        return false,"Runtime Error: Expected stats, timings, diagnostics, or preload | into:variable or -> | variable"
     end
     local target
     for index=2,#args do
@@ -16808,8 +17067,10 @@ engine["runtime"] = function(ctx, state, args)
         end
     end
     if not target then return false,"Runtime Error: "..action.." needs into:variable or -> | variable" end
-    if action=='timings' then
-        local written=update_variable_state(ctx,target,runtime_tools.timings(ctx))
+    if action=='timings' or action=='diagnostics' or action=='preload' then
+        local value=action=='timings' and runtime_tools.timings(ctx) or
+            action=='preload' and engine_preload_snapshot(ctx) or engine_diagnostics_snapshot(ctx)
+        local written=update_variable_state(ctx,target,value)
         if is_fatal(written) then return false,written.msg end
         return true
     end
@@ -17442,6 +17703,9 @@ engine["stop"] = function(src, state, args)
         return true
     end
     if target == "all" then
+        local owner=src.native_worker_program or src
+        owner.model_preloads=nil
+        if engine_sound_clear then engine_sound_clear(src) end
         if ENGINE_UI then ENGINE_UI.clear(src) end
         input_host.clear_pending(src)
         if src.input_handlers then INPUT_EVENTS.clear(src) end
@@ -17791,7 +18055,100 @@ engine["foreground"] = function(src, state, args)
     return true
 end
 engine["add_color"] = engine["foreground"]
+-- Only sources created by this program are owned; existing user sources are never replaced.
+function engine_sound_clear(ctx,name)
+    local owner=ctx.native_worker_program or ctx
+    for key,record in pairs(owner.owned_sounds or {}) do
+        if not name or key==name then
+            obslua.obs_source_media_stop(record.source)
+            if record.remove_item~=false then obslua.obs_sceneitem_remove(record.item) end
+            if record.previous_volume~=nil then obslua.obs_source_set_volume(record.source,record.previous_volume) end
+            if record.previous_monitor~=nil then obslua.obs_source_set_monitoring_type(record.source,record.previous_monitor) end
+            obslua.obs_sceneitem_release(record.item)
+            obslua.obs_source_release(record.source)
+            owner.owned_sounds[key]=nil
+        end
+    end
+end
 engine["sound"] = function(src, state, args)
+    if args[1]=="create" then
+        local fields,err=packed_fields(args,"create",{"name","file","volume","monitor"})
+        if not fields then return false,"Sound Error: "..err end
+        local name=fields.name and resolve_media_arg(src,fields.name)
+        local path=fields.file and resolve_path(src,fields.file)
+        local volume=fields.volume and resolve_path(src,fields.volume) or 0.5
+        local monitor=false
+        if fields.monitor then monitor=resolve_path(src,fields.monitor) end
+        if type(name)~="string" or name=="" or type(path)~="string" or path=="" then
+            return false,"Sound Error: Expected name and a quoted file path"
+        end
+        if type(volume)~="number" or volume~=volume or volume<0 or volume>1 then return false,"Sound Error: volume must be 0 to 1" end
+        if monitor~=true and monitor~=false and monitor~=0 and monitor~=1 then return false,"Sound Error: monitor must be true or false" end
+        if not path:match("^%a:[/\\]") and not path:match("^[/\\]") then path=(src.program_directory or script_path())..path end
+        local file=io.open(path,"rb")
+        if not file then return false,"Sound Error: Cannot open audio file '"..path.."'" end
+        file:close()
+        local owner=src.native_worker_program or src
+        local record=owner.owned_sounds and owner.owned_sounds[name]
+        local existing=obslua.obs_get_source_by_name(name)
+        if existing then
+            local settings=obslua.obs_source_get_settings(existing)
+            local existing_path=obslua.obs_data_get_string(settings,"local_file")
+            local local_file=obslua.obs_data_get_bool(settings,"is_local_file")
+            obslua.obs_data_release(settings)
+            local function normalized(p)
+                p=tostring(p or ""):gsub("\\","/")
+                return host_os=="Windows" and p:lower() or p
+            end
+            if obslua.obs_source_get_id(existing)~="ffmpeg_source" or not local_file or normalized(existing_path)~=normalized(path) then
+                obslua.obs_source_release(existing)
+                return false,"Sound Error: Source '"..name.."' already exists with a different type or audio file"
+            end
+            if record then
+                obslua.obs_source_release(existing)
+                obslua.obs_source_set_volume(record.source,volume)
+                obslua.obs_source_set_monitoring_type(record.source,(monitor==true or monitor==1) and obslua.OBS_MONITORING_TYPE_MONITOR_AND_OUTPUT or obslua.OBS_MONITORING_TYPE_NONE)
+                return true
+            end
+        elseif record then
+            return false,"Sound Error: The owned sound '"..name.."' was removed; delete it before recreating it"
+        end
+        local scene_source=obslua.obs_frontend_get_current_scene()
+        local scene=scene_source and obslua.obs_scene_from_source(scene_source)
+        if not scene then
+            if existing then obslua.obs_source_release(existing) end
+            if scene_source then obslua.obs_source_release(scene_source) end
+            return false,"Sound Error: No active scene"
+        end
+        local settings=obslua.obs_data_create()
+        obslua.obs_data_set_string(settings,"local_file",path)
+        obslua.obs_data_set_bool(settings,"is_local_file",true)
+        obslua.obs_data_set_bool(settings,"looping",false)
+        obslua.obs_data_set_bool(settings,"restart_on_activate",false)
+        local source=existing or obslua.obs_source_create("ffmpeg_source",name,settings,nil)
+        obslua.obs_data_release(settings)
+        if not source then obslua.obs_source_release(scene_source);return false,"Sound Error: Could not create media source" end
+        local item=existing and obslua.obs_scene_find_source(scene,name)
+        local remove_item=not item
+        if not item then item=obslua.obs_scene_add(scene,source) end
+        obslua.obs_source_release(scene_source)
+        if not item then obslua.obs_source_release(source);return false,"Sound Error: Could not add sound to scene" end
+        obslua.obs_sceneitem_addref(item)
+        owner.owned_sounds=owner.owned_sounds or {}
+        owner.owned_sounds[name]={source=source,item=item,remove_item=remove_item,
+            previous_volume=existing and obslua.obs_source_get_volume(source) or nil,
+            previous_monitor=existing and obslua.obs_source_get_monitoring_type(source) or nil}
+        obslua.obs_source_set_volume(source,volume)
+        obslua.obs_source_set_monitoring_type(source,(monitor==true or monitor==1) and obslua.OBS_MONITORING_TYPE_MONITOR_AND_OUTPUT or obslua.OBS_MONITORING_TYPE_NONE)
+        obslua.obs_source_media_stop(source)
+        return true
+    elseif args[1]=="delete" then
+        local name=resolve_media_arg(src,args[2])
+        local owner=src.native_worker_program or src
+        if not owner.owned_sounds or not owner.owned_sounds[name] then return false,"Sound Error: No owned sound named '"..tostring(name).."'" end
+        engine_sound_clear(src,name)
+        return true
+    end
     local target_name = resolve_path(src, args[1])
     if target_name == nil or is_fatal(target_name) then
         target_name = args[1]
@@ -19419,6 +19776,27 @@ function setup(settings)
 end
 -- Capture the selected entry file when Execute is pressed. Changing UI fields
 -- during a run must not redirect that program's later imports/saves/includes.
+-- Only native focus/window checks; no frontend scene queries from the tick loop.
+function input_host.program_focused(ctx)
+    if interaction_current and interaction_current.input_focused then return true end
+    local handle,why
+    if host_os=='Windows' then
+        handle=ctx.input_window
+        if not handle then handle,why=raymaze_mouse_window() end
+        if handle then
+            ctx.input_window=handle
+            return input_host.focused(handle) or input_windows_preview_projector(handle,ffi.C.GetForegroundWindow())
+        end
+    elseif host_os=='Linux' then
+        handle,why=linux_x11_keyboard()
+        if handle then return input_host.focused(handle) end
+    elseif host_os=='OSX' then
+        handle,why=mac_input.open()
+        if handle then mac_input.sample(handle,ctx);return input_host.focused(handle) end
+    end
+    return nil,why or 'No supported OBS focus backend'
+end
+
 function set_program_location(ctx, output_type, selected_file)
     local base=type(script_path)=="function" and script_path() or ""
     base=base:gsub("\\","/")
@@ -19437,8 +19815,282 @@ function set_program_location(ctx, output_type, selected_file)
     return ctx.program_file
 end
 
+-- Super commands control only this program; lifecycle work is deferred until
+-- no command or cooperative task is executing with a temporary scope.
+function engine_super_compile(args)
+    local action=safe_trim(tostring(args[1] or '')):lower()
+    action=({change='on_scene_change',focus='on_focus_loss',error='on_error'})[action] or action
+    local value=safe_trim(tostring(args[2] or '')):lower()
+    if action=='preload' then
+        if value=='clear' and #args==2 then return function(ctx) return engine_preload_models(ctx,{},'clear') end end
+        if (value=='model' or value=='models' or value=='reload' or value=='release') and #args>=3 then
+            local paths={};for i=3,#args do paths[#paths+1]=args[i] end
+            return function(ctx) return engine_preload_models(ctx,paths,value) end
+        end
+        return function() return false,'Super Command Error: Expected !!engine | preload | models/reload/release | "path" [| "path" ...], or preload | clear' end
+    end
+    local valid=false;local budget
+    if action=='restart' or action=='stop' then valid=#args==1
+    elseif #args==2 then
+        if action=='on_scene_change' then valid=({pause=true,reset=true,clear=true,refresh=true,continue=true,stop=true})[value]
+        elseif action=='on_focus_loss' then valid=value=='pause' or value=='continue'
+        elseif action=='on_error' then valid=value=='reset' or value=='clear' or value=='stop'
+        elseif action=='diagnostics' then valid=value=='on' or value=='off'
+        elseif action=='budget' then
+            local amount,unit=value:match('^([%d%.]+)%s*(%a*)$')
+            if amount and (unit=='' or unit=='ms' or unit=='s') then
+                budget=tonumber(amount)
+                if budget and unit=='s' then budget=budget*1000 end
+            end
+            valid=type(budget)=='number' and budget==budget and budget>=1 and budget<=20
+        end
+    end
+    if not valid then
+        return function() return false,'Super Command Error: Expected !!engine | on_scene_change | pause/reset/continue/stop; on_focus_loss | pause/continue; on_error | reset/stop; budget | 1ms..20ms; diagnostics | on/off; restart; or stop' end
+    end
+    return function(ctx)
+        local owner=ctx.native_worker_program or ctx
+        if action=='on_scene_change' then
+            if not owner.scene_current_id then return false,'Super Command Error: Execute the program in an active OBS scene first' end
+            owner.program_scene_id=owner.scene_current_id;owner.scene_change_policy=value
+        elseif action=='on_focus_loss' then owner.engine_focus_policy=value
+        elseif action=='on_error' then owner.engine_on_error=value=='clear' and 'reset' or value
+        elseif action=='budget' then owner.tick_budget_ms=budget
+        elseif action=='diagnostics' then
+            owner.engine_diagnostics_enabled=value=='on'
+            if value=='on' then owner.engine_diagnostics=owner.engine_diagnostics or {records={}} end
+        elseif action=='restart' then
+            if not owner.settings or type(owner.settings.str)~='function' or not owner.scene_current_id then return false,'Super Command Error: No executed program in an active scene to restart' end
+            owner.engine_control_pending='restart'
+        else owner.engine_control_pending='stop' end
+        return true
+    end
+end
+function engine_diagnostics_record(ctx,func,queue,index,task,started,ok,result,err)
+    local data=ctx.engine_diagnostics
+    if not data then return end
+    local command=redact_network_credentials(queue and queue._command_map and queue._command_map[index] or
+        type(task)=='table' and task.cmd and '!'..task.cmd or '(internal command)')
+    local line=queue and queue._line_map and queue._line_map[index] or index or 0
+    local key=(task and 'task:' or 'main:')..tostring(line)..':'..command
+    local row=data.records[key]
+    if not row then
+        row={command=command,line=line,calls=0,total_ms=0,max_ms=0,main_calls=0,task_calls=0,errors=0}
+        data.records[key]=row
+    end
+    local elapsed=math.max(0,engine_tick_now_ms()-started)
+    row.calls=row.calls+1;row.total_ms=row.total_ms+elapsed;row.max_ms=math.max(row.max_ms,elapsed)
+    row[task and 'task_calls' or 'main_calls']=row[task and 'task_calls' or 'main_calls']+1
+    if not ok or result==false and type(err)=='string' then row.errors=row.errors+1 end
+end
+function engine_diagnostics_snapshot(ctx)
+    local result={enabled=ctx.engine_diagnostics_enabled and 1 or 0,commands={},calls=0,total_ms=0}
+    for _,record in pairs(ctx.engine_diagnostics and ctx.engine_diagnostics.records or {}) do
+        local row={};for key,value in pairs(record) do row[key]=value end
+        row.mean_ms=row.calls>0 and row.total_ms/row.calls or 0
+        result.commands[#result.commands+1]=row;result.calls=result.calls+row.calls;result.total_ms=result.total_ms+row.total_ms
+    end
+    table.sort(result.commands,function(a,b)
+        if a.total_ms~=b.total_ms then return a.total_ms>b.total_ms end
+        if a.command~=b.command then return a.command<b.command end
+        return a.line<b.line
+    end)
+    result.command_count=#result.commands
+    return result
+end
+function engine_controls_boundary(ctx)
+    local action=ctx.engine_control_pending
+    if not action then return true end
+    ctx.engine_control_pending=nil
+    if action=='stop' then engine['stop'](ctx,{}, {'all'});ctx.isInitialized=false;ctx.engine_scene_interrupted=nil;return false end
+    local settings,scene=ctx.engine_base_settings or ctx.settings,ctx.scene_current_id
+    local screen=ctx.program_screen or ctx.active_scope and ctx.active_scope.screen
+    local mode,file,entry=ctx.program_output,ctx.program_file,ctx.program_entry_code
+    engine_scene_clear(ctx)
+    if action=='restart' then
+        local proxy=setmetatable({str=function(key,...)
+            if select('#',...)==0 then
+                if key=='output' then return mode end
+                if key=='file' then return file end
+                if (key=='text' or key=='input') and entry~=nil then return entry end
+            end
+            return settings.str(key,...)
+        end},{__index=settings})
+        local ok,why=pcall(run_code,ctx,proxy,scene,screen)
+        if not ok then
+            generate_stack_trace(ctx,'Engine Restart',ctx.queue,ctx.labels,ctx.call_stack,
+                ctx.current_idx,ctx.context_id,why)
+            engine_scene_clear(ctx)
+            ctx.engine_control_pending=nil
+        end
+    end
+    return false
+end
+-- Scene identity is a UUID, not the editable scene name; no native ref is retained.
+function engine_scene_source_identity(source)
+    if not source then return nil end
+    local identity
+    if obslua.obs_source_get_uuid then
+        local ok,value=pcall(obslua.obs_source_get_uuid,source)
+        if ok then identity=value end
+    end
+    if not identity or identity=="" then identity=obslua.obs_source_get_name(source) end
+    return identity
+end
+function engine_scene_identity()
+    if type(obslua.obs_frontend_get_current_scene)~='function' then return nil end
+    local source=obslua.obs_frontend_get_current_scene()
+    local identity=engine_scene_source_identity(source)
+    if not source then return nil end
+    obslua.obs_source_release(source)
+    return identity
+end
+-- Reuse a scene pointer already acquired by a scene-bound command. A frontend
+-- notification can still be queued when that command sees the new scene.
+function engine_scene_observe(ctx,source)
+    local owner=ctx and (ctx.native_worker_program or ctx)
+    if not owner or not owner.program_scene_id then return true end
+    local identity=engine_scene_source_identity(source)
+    owner.scene_current_id=identity
+    if identity==owner.program_scene_id or owner.scene_change_policy=='continue' then return true end
+    owner.engine_scene_interrupted=true
+    local policy=owner.scene_change_policy
+    if policy~='pause' then
+        owner.engine_control_pending=(policy=='reset' or policy=='clear' or policy=='refresh') and 'reset' or 'stop'
+    end
+    return false
+end
+function engine_scene_bind(ctx)
+    ctx.program_scene_id=engine_scene_identity()
+    ctx.scene_current_id=ctx.program_scene_id
+    ctx.scene_pause_at=nil;ctx.scene_pause_cpu=nil
+    ctx.scene_pause_releases=nil
+    ctx.engine_scene_interrupted=nil
+end
+function engine_scene_update(ctx)
+    if ctx then ctx.scene_current_id=engine_scene_identity() end
+end
+function engine_scene_clear(ctx)
+    engine['stop'](ctx,{}, {'all'})
+    release_canvas_buffers(ctx)
+    for _,world in pairs(world3d_worlds or {}) do
+        world3d_cancel_builds(world)
+        world.objects={};world.order={};world.edits={};world.animations={};world.views={}
+        world.version=(world.version or 0)+1
+    end
+    for i=#(auto_cleanup or {}),1,-1 do
+        local item=auto_cleanup[i]
+        if item and item.data then
+            local ok,removed=pcall(item.remove)
+            if ok and removed~=false then forget_clone(item) end
+        end
+    end
+    obs.register:remove_all()
+    ctx.active_scope={};ctx.vars=ctx.active_scope;ctx.scopes=ctx.active_scope
+    ctx.functions={};ctx.global_registry={};ctx.queue={};ctx.labels={};ctx.state={}
+    ctx.sprite_states=nil;ctx.animation_states=nil;ctx.isInitialized=false
+    ctx.module_commands=nil;ctx.loaded_modules=nil;ctx.type_registry={}
+    ctx.scene_change_policy=nil;ctx.scene_pause_at=nil;ctx.scene_pause_releases=nil
+    ctx.engine_scene_interrupted=nil
+end
+function engine_scene_gate(ctx,now)
+    local away=ctx.program_scene_id and ctx.scene_current_id~=ctx.program_scene_id
+    if away and ctx.scene_change_policy~='continue' and ctx.scene_change_policy~='pause' then
+        if ctx.scene_change_policy=='reset' or ctx.scene_change_policy=='clear' or ctx.scene_change_policy=='refresh' then
+            engine_scene_clear(ctx)
+        else engine['stop'](ctx,{}, {'all'});ctx.isInitialized=false end
+        return false
+    end
+    local unfocused=false
+    if ctx.engine_focus_policy=='pause' then
+        local focused,why=input_host.program_focused(ctx)
+        if focused==nil then
+            generate_stack_trace(ctx,'Main Execution Loop',ctx.queue,ctx.labels,ctx.call_stack,
+                ctx.current_idx,ctx.context_id,'Focus Error: '..tostring(why))
+            engine['stop'](ctx,{}, {'all'});ctx.isInitialized=false
+            return false
+        end
+        unfocused=not focused
+    end
+    if (away and ctx.scene_change_policy=='pause') or unfocused then
+        if not ctx.scene_pause_at then
+            ctx.scene_pause_at=now;ctx.scene_pause_cpu=os.clock()
+            local held=ctx.input_event_poll and ctx.input_event_poll.input_previous or {}
+            ctx.scene_pause_releases={}
+            for id,binding in pairs(ctx.input_handlers or {}) do
+                if binding.code and binding.code.family=='input' and binding.code.kind=='release' and held[binding.code.key] then
+                    ctx.scene_pause_releases[id]=binding
+                end
+            end
+            for _,record in pairs(ctx.owned_sounds or {}) do
+                if obslua.obs_source_media_get_state and obslua.OBS_MEDIA_STATE_PLAYING and
+                   obslua.obs_source_media_get_state(record.source)==obslua.OBS_MEDIA_STATE_PLAYING then
+                    record.scene_was_playing=true
+                    obslua.obs_source_media_play_pause(record.source,true)
+                end
+            end
+            input_host.clear_pending(ctx)
+            if ctx.input_event_poll then input_host.clear_pending(ctx.input_event_poll) end
+            ctx.input_event_streams=nil
+            for _,binding in pairs(ctx.input_handlers or {}) do
+                if binding.code and (binding.code.family=='input' or binding.code.family=='ui') then
+                    binding.pending=nil;binding.pointer=nil
+                end
+            end
+            if ctx.ui_state then
+                local ui=ctx.ui_state
+                if ui.capture then ui.capture.surface.dirty=true end
+                if ui.hover then ui.hover.surface.dirty=true end
+                ui.capture=nil;ui.capture_path=nil;ui.hover=nil;ui.repeat_keys=nil
+                ui.pointer_captured=false;ui.keyboard_captured=false
+            end
+        end
+        -- Keep transport handshakes/heartbeats alive without dispatching script handlers.
+        if ctx.tcp_connections then TCP.pump(ctx,now+math.min(1,(ctx.tick_budget_ms or 6)*.15)) end
+        return false
+    end
+    if not ctx.scene_pause_at then return true end
+    local elapsed=math.max(0,now-ctx.scene_pause_at)
+    local cpu=math.max(0,os.clock()-(ctx.scene_pause_cpu or os.clock()))
+    local seen={}
+    local function shift_state(state)
+        if type(state)~='table' or seen[state] then return end
+        seen[state]=true
+        if type(state.start_ms)=='number' then state.start_ms=state.start_ms+elapsed end
+        -- Fetch uses a real external-process deadline; its timeout remains real time.
+        if type(state.start_time)=='number' and not state.temp_done then state.start_time=state.start_time+cpu end
+    end
+    local function shift_task(task)
+        if type(task.frame_resume_ms)=='number' then task.frame_resume_ms=task.frame_resume_ms+elapsed end
+        if type(task.last_spawn_time)=='number' then task.last_spawn_time=task.last_spawn_time+elapsed end
+        if type(task.expire_time)=='number' then task.expire_time=task.expire_time+elapsed end
+        shift_state(task.state)
+        for _,frame in ipairs(task.call_stack or {}) do shift_state(frame.state) end
+    end
+    shift_task(ctx)
+    for _,task in ipairs(ctx.async_tasks or {}) do shift_task(task) end
+    input_host.clear_pending(ctx)
+    if ctx.input_event_poll then input_host.clear_pending(ctx.input_event_poll) end
+    ctx.input_event_streams=nil
+    ctx.interrupt_label=nil
+    for id,binding in pairs(ctx.scene_pause_releases or {}) do
+        if ctx.input_handlers and ctx.input_handlers[id]==binding then
+            INPUT_EVENTS.emit(binding,{key=binding.code.key,kind='release',dt=0,down=0,pressed=0,released=1,
+                focused=0,x=-1,y=-1,mouse_inside=0})
+        end
+    end
+    ctx.scene_pause_releases=nil
+    for _,record in pairs(ctx.owned_sounds or {}) do
+        if record.scene_was_playing then
+            record.scene_was_playing=nil
+            obslua.obs_source_media_play_pause(record.source,false)
+        end
+    end
+    ctx.scene_pause_at=nil;ctx.scene_pause_cpu=nil
+    return true,true
+end
 -- [[ RUN CODE ]]
-function run_code(src, settings)
+function run_code(src, settings, restart_scene_id, restart_screen)
     if runtime_tools then runtime_tools.reset(src) end
     if not src or not settings then
         return error("4IM3-SCRIPT: Something wrong happened, please try again")
@@ -19453,6 +20105,7 @@ function run_code(src, settings)
         return
     end
     INPUT_EVENTS.clear(src)
+    if engine_sound_clear then engine_sound_clear(src) end
     if ENGINE_UI then ENGINE_UI.clear(src) end
     input_host.clear_pending(src)
     if src.native_workers then native_worker_cancel_all(src) end
@@ -19475,13 +20128,24 @@ function run_code(src, settings)
             file:close()
         end
     end
+    if not restart_scene_id then src.engine_base_settings=settings end
     src.settings = settings
+    src.program_entry_code=raw_code
     src.tick_budget_ms = math.max(1, math.min(20, tonumber(settings.int("tick_budget_ms")) or 6))
     src.no_yield_ops = 0
     src.no_yield_budget_ticks = 0
     src.async_resume_index = nil
     src.async_resume_task = nil
     src.current_task = nil
+    src.scene_change_policy=nil
+    src.engine_focus_policy=nil;src.engine_on_error=nil;src.engine_control_pending=nil
+    src.engine_scene_interrupted=nil
+    src.engine_diagnostics_enabled=nil;src.engine_diagnostics=nil
+    src.model_preloads=nil
+    if restart_scene_id then
+        src.program_scene_id=restart_scene_id;src.scene_current_id=restart_scene_id
+        src.scene_pause_at=nil;src.scene_pause_cpu=nil;src.scene_pause_releases=nil
+    elseif engine_scene_bind then engine_scene_bind(src) end
     src.for_frames = {}
     src.run_depth = 0
     src.tick_deadline_ms = nil
@@ -19597,11 +20261,12 @@ function run_code(src, settings)
     src.native_worker_owners = nil
     src.native_worker_blocks = nil
     src.active_scope = {
-        screen = obs.scene:size(),
+        screen = restart_screen or obs.scene:size(),
         pi = math.pi,
         huge = math.huge
     }
     src.call_stack = {}
+    src.program_screen={width=src.active_scope.screen.width,height=src.active_scope.screen.height}
 
     local compiled_queue, compiled_labels = compile_block_text(src, code, 0)
     src.queue = compiled_queue
@@ -20353,6 +21018,7 @@ end
 function script_tick(fps)
     if obs and obs.utils and obs.utils.script_shutdown then return end
     local tick_start_ms = engine_tick_now_ms()
+    if engine_controls_boundary and not engine_controls_boundary(src) then return end
     if src.world3d_removed_source then
         local removed_name = src.world3d_removed_source
         src.world3d_removed_source = nil
@@ -20380,6 +21046,12 @@ function script_tick(fps)
         input_preview_menu_release(src)
         return
     end
+    if src.program_scene_id or src.engine_focus_policy then
+        local scene_active,resumed=engine_scene_gate(src,tick_start_ms)
+        if not scene_active then return end
+        if resumed then fps=math.min(tonumber(fps) or .016,.05) end
+    end
+    src.engine_scene_interrupted=nil
     local tick_deadline_ms = tick_start_ms + tick_budget_ms
     src.tick_deadline_ms = tick_deadline_ms
     -- Result decoding and mesh preparation share the remaining time after the
@@ -20401,7 +21073,7 @@ function script_tick(fps)
         #(src.async_tasks or {})>0 or next(src.input_handlers or {})) then
         local ok,accepted,why=pcall(input_host.sample_pending,src)
         if not ok then why=accepted;accepted=false end
-        if not accepted then
+        if not accepted and not src.engine_scene_interrupted then
             generate_stack_trace(src,'Main Execution Loop',src.queue,src.labels,src.call_stack,
                 src.current_idx,src.context_id,why)
             src.current_idx=#src.queue+1
@@ -20714,7 +21386,7 @@ function script_tick(fps)
     if next(src.input_handlers or {}) or src.ui_state then
         local poll_ok,input_ok,input_err=pcall(INPUT_EVENTS.poll,src,fps or .016,main_deadline_ms)
         if not poll_ok then input_err=input_ok;input_ok=false end
-        if not input_ok then
+        if not input_ok and not src.engine_scene_interrupted then
             generate_stack_trace(src,'Main Execution Loop',src.queue,src.labels,src.call_stack,
                 src.current_idx,src.context_id,input_err)
             src.current_idx=#src.queue+1
@@ -20740,6 +21412,7 @@ function script_tick(fps)
         src.async_resume_task = nil
         local processed_async = 0
         for i = async_start, 1, -1 do
+            if src.engine_control_pending or src.engine_scene_interrupted then break end
             if processed_async > 0 and engine_tick_now_ms() >= tick_deadline_ms then
                 src.async_resume_index = i
                 src.async_resume_task = async_snapshot[i]
@@ -20821,7 +21494,14 @@ function script_tick(fps)
                         task.exe = compile_line(task.cmd, task.args)
                     end
                     if task.exe then
-                        local is_finished = task.exe(src, task.state)
+                        local profile_start=src.engine_diagnostics_enabled and engine_tick_now_ms() or nil
+                        local ok,is_finished,why=pcall(task.exe,src,task.state)
+                        if profile_start then engine_diagnostics_record(src,task.exe,nil,0,task,profile_start,ok,is_finished,why) end
+                        if src.engine_scene_interrupted then break end
+                        if not ok or is_finished==false and type(why)=='string' then
+                            generate_stack_trace(src,task.name or 'Async Task',nil,nil,nil,0,task.context_id,ok and why or is_finished)
+                            is_finished=true
+                        end
                         if is_finished then
                             local live_index = find_async_task_index(src, task, i)
                             if live_index then table.remove(src.async_tasks, live_index) end
@@ -20831,6 +21511,7 @@ function script_tick(fps)
             end
         end
     end
+    if src.engine_control_pending or src.engine_scene_interrupted then return end
     local main_start_ms = engine_tick_now_ms()
     src.tick_last_async_ms = main_start_ms - async_start_ms
     local brake = 0
@@ -20854,7 +21535,10 @@ function script_tick(fps)
             break
         end
 
+        local profile_start=src.engine_diagnostics_enabled and engine_tick_now_ms() or nil
         local success, result, target = pcall(execute_func, src)
+        if profile_start then engine_diagnostics_record(src,execute_func,src.queue,src.current_idx,false,profile_start,success,result,target) end
+        if src.engine_scene_interrupted then break end
         if not success then
             generate_stack_trace(src, "Main Execution Loop", src.queue, src.labels, src.call_stack, src.current_idx,
                 src.context_id, result)
@@ -20867,6 +21551,7 @@ function script_tick(fps)
             result = false
         end
 
+        if src.engine_control_pending or src.engine_scene_interrupted then break end
         if result == false then
             src.no_yield_ops = 0
             src.no_yield_budget_ticks = 0
@@ -21033,6 +21718,7 @@ function script_tick(fps)
         src.no_yield_budget_ticks = 0
     end
 
+    if src.engine_control_pending or src.engine_scene_interrupted then return end
     local collision_start_ms = engine_tick_now_ms()
     src.tick_last_main_ms = collision_start_ms - main_start_ms
     -- ==========================================================
@@ -21138,6 +21824,7 @@ function script_tick(fps)
             end
         end
     end
+    if src.engine_control_pending or src.engine_scene_interrupted then return end
     local ui_start_ms=engine_tick_now_ms()
     if src.ui_state then ENGINE_UI.render(src) end
     src.tick_last_ui_ms=engine_tick_now_ms()-ui_start_ms
@@ -21248,10 +21935,16 @@ function script_load(settings)
             obs.utils.first_time_load = true
             obs.utils.loaded = true
             obs.utils.settings.bul("obs_custom_api_exited", false)
+        elseif event_id == obslua.OBS_FRONTEND_EVENT_SCENE_CHANGED or
+            event_id == obslua.OBS_FRONTEND_EVENT_TRANSITION_STOPPED or
+            event_id == obslua.OBS_FRONTEND_EVENT_PREVIEW_SCENE_CHANGED or
+            event_id == obslua.OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED then
+            engine_scene_update(src)
         elseif event_id == obslua.OBS_FRONTEND_EVENT_EXIT or
             (script_is_unloading and event_id == obslua.OBS_FRONTEND_EVENT_SCENE_COLLECTION_CLEANUP) then
             obs.utils.obs_closing = true
         elseif event_id == obslua.OBS_FRONTEND_EVENT_SCRIPTING_SHUTDOWN then
+            src.model_preloads=nil
             script_is_unloading = true
             obs.utils.obs_closing = true
             obs.utils.script_shutdown = true
@@ -21310,7 +22003,9 @@ function script_save(settings)
 end
 
 function script_unload()
+    if src then src.model_preloads=nil end
     obs.utils.script_shutdown = true
+    if src and engine_sound_clear then engine_sound_clear(src) end
     if src and ENGINE_UI then ENGINE_UI.clear(src) end
     if src and src.input_handlers then INPUT_EVENTS.clear(src) end
     if TCP then TCP.shutdown(src) end
@@ -22412,6 +23107,10 @@ function obs.scene:get_scene(scene_name)
     local source_scene;
     if not scene_name or not type(scene_name) == "string" then
         source_scene = obslua.obs_frontend_get_current_scene()
+        if engine_scene_observe and not engine_scene_observe(src,source_scene) then
+            if source_scene then obslua.obs_source_release(source_scene) end
+            return nil
+        end
         if not source_scene then
             return nil
         end
@@ -23394,6 +24093,7 @@ function obs.front.source(source)
     elseif type(source) == "string" then
         source_name = source
         local current_scene = obs.scene:get_scene()
+        if src and src.engine_scene_interrupted then return nil end
         if current_scene and current_scene.data then
             local current_item = current_scene.get(source_name)
             current_scene.free()
