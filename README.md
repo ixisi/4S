@@ -40,9 +40,9 @@ This single-file reference explains the language syntax, commands, values, units
 
 ## Install and run
 
-1. In OBS, open **Tools Ã¢â€ â€™ Scripts**, add `4IM3-SCRIPT-2.3.0.lua`, and leave it loaded. OBS must have Lua scripting available. The engine registers three source types: **4IM3 Pixel Renderer**, **4IM3 Shader Renderer**, and **4IM3 3D Renderer**.
+1. In OBS, open **Tools → Scripts**, add `4IM3-SCRIPT-2.3.0.lua`, and leave it loaded. OBS must have Lua scripting available. The engine registers three source types: **4IM3 Pixel Renderer**, **4IM3 Shader Renderer**, and **4IM3 3D Renderer**.
 2. Choose **OUTPUT: FILE** and select a UTF-8 `.txt` or `.4im3` program, or choose **OUTPUT: TEXT** and paste commands. **OUTPUT: INPUT** is a one-line input. Press **Execute** to compile and start the program. Loading the engine by itself does not execute the program field.
-3. Look at the active OBS scene for graphics. Use **Help Ã¢â€ â€™ Log Files Ã¢â€ â€™ View Current Log** for `!log`, validation errors, and stack traces.
+3. Look at the active OBS scene for graphics. Use **Help → Log Files → View Current Log** for `!log`, validation errors, and stack traces.
 4. Set **Script work budget per tick (ms)** between 1 and 20 if needed; the default is 6. This is a cap on script work per OBS tick, **not** a game FPS setting. A program that needs a new picture each frame should use `!wait | frame |+|`.
 
 Pressing **Execute** again resets program variables, tasks, functions, sprite definitions, and canvas buffers. `!save` values stored in OBS settings can be loaded on a later run. Relative resource paths follow the selected output mode:
@@ -281,7 +281,7 @@ Paste this into **OUTPUT: TEXT** and press **Execute**. It creates its own rende
 !log | "HelloView is ready" |+|
 ```
 
-`!renderer | create` adds or configures a direct scene source of the requested kind. `!canvas | create` makes a pixel buffer and selects it. Drawing changes that buffer; `!canvas | update` sends the finished image to the renderer. The 320 Ãƒâ€” 180 buffer is scaled to the renderer's 640 Ãƒâ€” 360 output.
+`!renderer | create` adds or configures a direct scene source of the requested kind. `!canvas | create` makes a pixel buffer and selects it. Drawing changes that buffer; `!canvas | update` sends the finished image to the renderer. The engine draws into a buffer 320 pixels wide and 180 pixels high, then enlarges it to the renderer's 640-by-360-pixel output. This doubles the image's width and height; it does not add drawing detail.
 
 `!renderer | create` also accepts `locked:true` or `locked:false` to set the OBS scene item's lock. Omit it to keep the current lock state; locking helps when a script uses mouse drags over OBS's main preview.
 
@@ -429,6 +429,7 @@ forms continue to work.
 | `!world3d`: `animate` with `mode:list` or `mode:status` | A clip-name list or playback-status table. Other animation modes do not return a result. |
 | `!input`: `snapshot`, `keys` | The usual input table. Put requested keys after the action and before the arrow; omit the original table destination. |
 | `!input`: `key`, `mouse` | A table with numeric `down`, `pressed`, and `released` fields. The original separate output variables remain supported. |
+| `!input`: `action`, `bindings` | An action-state record, or an array of its normalized key names. See [named input actions](#named-input-actions-and-rebinding). |
 | `!input`: `pointer` | A table with `x`, `y`, `mouse_inside`, and `focused`. The last two fields are numeric 0 or 1. |
 | `!input`: `recenter` | A table with `supported`, `warped` (numeric 0/1), and source coordinates `x`, `y`. |
 | `!input`: `focus`, `text`, `wheel`, `status` | A numeric focus flag, typed UTF-8 text, wheel delta, or backend diagnostic record. |
@@ -634,6 +635,22 @@ compiled body. Use `!jump | retry |+|` within that body. Enter a function throug
 
 `!label` marks a location; it **does not skip the following commands**. To keep a helper label from running on initial pass, jump around it, put it after a terminating flow, or use `!fn` instead. `!jump | label` branches; `!call | label | optional_name:value | -> | result` enters a label with a return point; `!return` returns. `!if | condition | label | ret |+|` conditionally calls a label, while the form without `ret` jumps. Labels and functions are separate: `!call` and `!jump` do not invoke `!fn` definitions. `!label | <name> |+|` declares a global label usable from compatible contexts.
 
+`startup` is not a reserved macro or automatic entry point in the current
+engine. For example:
+
+```text
+!label | <startup> |+|
+!log | "Preparing the program" |+|
+!var | score | 0 |+|
+```
+
+Here, `<startup>` is simply a global label named `startup`. Its following
+commands run when normal execution reaches them, including the initial pass
+when this is at the top of the entry script. Jumping back to the label runs
+those commands again. It does not register an OBS-startup event or a run-once
+guard. A standalone `<startup>` marker is not valid syntax. Global labels must
+remain outside function and event-handler bodies.
+
 `!loop | count | label_or_{block} |+|` and `!foreach | table | item_name | label |+|` are older forms. For new frame loops, prefer `!for` where possible and place `!wait | frame` deliberately. A tight `!jump` loop with no yield eventually triggers the runaway-script guard.
 
 ## Units and coordinate systems
@@ -644,15 +661,15 @@ compiled body. Use `!jump | retry |+|` within that body. Enter a function throug
 | `tick` | Seconds since the preceding frame resume | Frame-rate-independent game movement. |
 | `!media_time` result | Milliseconds on the OBS media playhead | Music cues and hit windows. |
 | `!animation` `duration` and `time` | Seconds | Choosing sprite frames. Do not append `ms` here. |
-| Renderer `width`, `height` | Output source pixels, 1Ã¢â‚¬â€œ8192 each | `!renderer \| create`. |
-| Canvas `width`, `height`, `x`, `y`, `radius` | Buffer pixels; buffer dimensions 1Ã¢â‚¬â€œ8192, up to 16 million total pixels | `!canvas`, `!sprite`, `!animation`. The origin is at the top left; x increases rightward, y downward. |
+| Renderer `width`, `height` | Output source pixels, 1–8192 each | `!renderer \| create`. |
+| Canvas `width`, `height`, `x`, `y`, `radius` | Buffer pixels; buffer dimensions 1–8192, up to 16 million total pixels | `!canvas`, `!sprite`, `!animation`. The origin is at the top left; x increases rightward, y downward. |
 | OBS source `pos`, `size`, `width`, `height` | OBS scene canvas pixels | Source methods and movement commands. These can differ from buffer pixels. |
 | 3D `x`, `y`, `z`, box `width`, `height`, `depth`, mesh vertices | World units; positive x is right, positive y is up, and **negative z is in front of the default camera** | `!world3d`. These are not OBS or canvas pixels. |
 | 3D `yaw`, `pitch`, `roll`, camera `fov` | Degrees | `!world3d`; `fov` is vertical field of view. |
-| `red`, `green`, `blue` (`r`, `g`, `b`) | Integer channel intensity, 0Ã¢â‚¬â€œ255 | Canvas colors and source color effects. |
-| `interpolation` (`alpha`) | 0Ã¢â‚¬â€œ1 | `!canvas \| rectangles` old/current-position blending. |
+| `red`, `green`, `blue` (`r`, `g`, `b`) | Integer channel intensity, 0–255 | Canvas colors and source color effects. |
+| `interpolation` (`alpha`) | 0–1 | `!canvas \| rectangles` old/current-position blending. |
 | `scale` on renderer | Scene-item multiplier, above 0 through 32 | `!renderer \| create`. |
-| `scale` on canvas text | Whole font-pixel multiplier, 1Ã¢â‚¬â€œ8 | `!canvas \| text`. |
+| `scale` on canvas text | Whole font-pixel multiplier, 1–8 | `!canvas \| text`. |
 | `rot` | Degrees | OBS source rotation. |
 
 The duration parser recognizes `s`, `mi`, and `hr`; other/no suffixes are treated as milliseconds. It reads a nonnegative numeric portion. Use explicit units for readability. OBS's own FPS counter and a program's animation rate are different: the scene can still render at 60 FPS while a script updates its picture only a few times per second.
@@ -695,7 +712,7 @@ per call rather than mixing positional and named arguments.
 !canvas | update |+|
 ```
 
-`!canvas | update` is the public readable name for the older `present` action. It publishes a complete copy of the current drawing pixels for the next OBS render. Drawing after that command changes only the working buffer: the preview and projectors keep showing the last published image until another `update`. This prevents incomplete UI redraws from flashing on screen when drawing spans several script ticks. Repeated calls without changes do not copy pixels or force another upload. Each canvas keeps one additional RGBA buffer for its published image (width Ãƒâ€” height Ãƒâ€” 4 bytes), reused across updates. A `create` replaces that buffer, while `!canvas | use | name:View |+|` switches to an existing buffer **without clearing it**. Multiple renderers can therefore have separate buffers. `snapshot` remembers the selected buffer's working pixels, and `restore` copies them back; this is useful for an expensive static background under moving sprites. Canvas dimensions may be 1Ã¢â‚¬â€œ8192 pixels per side, with a 16-million-pixel total limit.
+`!canvas | update` is the public readable name for the older `present` action. It publishes a complete copy of the current drawing pixels for the next OBS render. Drawing after that command changes only the working buffer: the preview and projectors keep showing the last published image until another `update`. This prevents incomplete UI redraws from flashing on screen when drawing spans several script ticks. Repeated calls without changes do not copy pixels or force another upload. Each canvas keeps one additional RGBA buffer for its published image (width × height × 4 bytes), reused across updates. A `create` replaces that buffer, while `!canvas | use | name:View |+|` switches to an existing buffer **without clearing it**. Multiple renderers can therefore have separate buffers. `snapshot` remembers the selected buffer's working pixels, and `restore` copies them back; this is useful for an expensive static background under moving sprites. Canvas dimensions may be 1–8192 pixels per side, with a 16-million-pixel total limit.
 
 Drawing inside a function that has not selected its own canvas inherits the
 nearest caller's selection. This also applies to `!sprite | draw` and
@@ -712,14 +729,14 @@ that should remain hidden.
 | `!canvas \| fill` | `red`, `green`, `blue`, optional `opacity` | Fill the selected buffer with one color. `opacity:0` makes it transparent; the default is 255. |
 | `!canvas \| rectangle` | `x`, `y`, `width`, `height`, `red`, `green`, `blue` | Draw a filled rectangle. `x,y` is its top-left corner. |
 | `!canvas \| circle` | `x`, `y`, `radius`, `red`, `green`, `blue` | Draw a filled circle centered at `x,y`. Radius is in buffer pixels and must be 0 to 2048. |
-| `!canvas \| text` | `text`, `x`, `y`, `red`, `green`, `blue`; optional `scale`, `font` | Draw text at its top-left position. `font:classic` (default) uses a 3 Ãƒâ€” 5 bitmap; `font:readable` uses a clearer 5 Ãƒâ€” 7 bitmap. `scale` magnifies each font pixel; it defaults to 1 and must be a whole number from 1 to 8. |
+| `!canvas \| text` | `text`, `x`, `y`, `red`, `green`, `blue`; optional `scale`, `font` | Draw text at its top-left position. `font:classic` (default) uses a 3 × 5 bitmap; `font:readable` uses a clearer 5 × 7 bitmap. `scale` magnifies each font pixel; it defaults to 1 and must be a whole number from 1 to 8. |
 | `!canvas \| rectangles` | See below | Draw many filled rectangles from coordinate tables in one command. |
 | `!canvas \| update` | None | Send the finished buffer to the OBS renderer on its next render. Call this after drawing a frame. Repeating it with no pixel changes does not upload a new frame. |
 | `!canvas \| snapshot` / `restore` | None | Remember or restore the selected buffer pixels. |
 
 In named renderer/canvas calls, `w`/`h` mean `width`/`height`, `r`/`g`/`b` mean full color names, `renderer`/`source` mean `name`, and renderer `type` means `kind`. Canvas text also accepts `message` or `content` for `text`. Unknown, repeated, missing, or mixed positional/named fields are errors. Positional calls keep the documented action-first order.
 
-Both built-in canvas fonts contain uppercase `A`Ã¢â‚¬â€œ`Z`, digits, spaces, and common punctuation for values and paths. For a menu, use `!canvas | text | font:readable | text:"SETTINGS" | x:10,y:20,scale:2,red:255,green:255,blue:255 |+|`. `font:classic` keeps existing scripts' text layout. For typography beyond these bitmap faces, use an OBS text source or a packed sprite. Circle radius is limited to 0Ã¢â‚¬â€œ2048 buffer pixels.
+Both built-in canvas fonts contain uppercase `A`–`Z`, digits, spaces, and common punctuation for values and paths. For a menu, use `!canvas | text | font:readable | text:"SETTINGS" | x:10,y:20,scale:2,red:255,green:255,blue:255 |+|`. `font:classic` keeps existing scripts' text layout. For typography beyond these bitmap faces, use an OBS text source or a packed sprite. Circle radius is limited to 0–2048 buffer pixels.
 
 #### Drawing many rectangles
 
@@ -786,7 +803,7 @@ access. `!array.unpack` is an alias that takes the same attributes without the
 `!sprite | create` takes a name, width, height, a comma-separated palette, and
 base64 pixel bytes. Each pixel byte indexes the palette starting at zero.
 `transparent` leaves the current canvas pixel untouched; other entries are
-`#RRGGBB` colors. The number of pixel bytes must equal width Ãƒâ€” height. A sprite
+`#RRGGBB` colors. The number of pixel bytes must equal width × height. A sprite
 can have at most 256 palette entries and 65536 pixels.
 
 `!sprite | draw` paints the stored sprite at the specified top-left `x,y` on
@@ -1274,7 +1291,7 @@ Object names accept variables directly (`name:selected_part`), including table p
 
 The script chooses each path; there is no fixed model file. A string variable also works as `path`. Relative paths use the selected main program's folder in File mode, or the engine Lua file's folder in Text/Input mode. `save` and `export` overwrite the chosen file. `load` checks the file before replacing the current world and keeps the renderer's current dimensions. Exported script names that contain punctuation or spaces are assigned safe aliases such as `ExportPart1`; `save` preserves the exact names. The engine's model format is distinct from OBJ and glTF. It preserves imported UVs and embedded images; an external texture path still needs its image file.
 
-3D positions and box sizes use **world units**. At zero camera rotation, x points right, y points up, and objects with negative z are in front of the camera. Angles and `fov` use degrees; colors use channel values from 0 to 255. `fov` must be 1Ã¢â‚¬â€œ179 degrees, `near` must be positive and smaller than `far`, and dimensions must be positive. Coordinates, sizes, import scale, and clipping distances have no arbitrary Ã‚Â±1,000,000/10,000 caps; finite numbers and meaningful validation still apply. The GPU uses 32-bit floating point, so very large coordinates lose precision; a floating render origin is useful for large worlds. Named fields can be reordered and grouped with commas, as with canvas commands. Multiple worlds have independent cameras and objects. The renderer supports opaque colored or diffuse-textured triangles with simple face shading and uses OBS's graphics API.
+3D positions and box sizes use **world units**. At zero camera rotation, x points right, y points up, and objects with negative z are in front of the camera. Angles and `fov` use degrees; colors use channel values from 0 to 255. `fov` must be 1–179 degrees, `near` must be positive and smaller than `far`, and dimensions must be positive. Coordinates, sizes, import scale, and clipping distances have no arbitrary ±1,000,000/10,000 caps; finite numbers and meaningful validation still apply. The GPU uses 32-bit floating point, so very large coordinates lose precision; a floating render origin is useful for large worlds. Named fields can be reordered and grouped with commas, as with canvas commands. Multiple worlds have independent cameras and objects. The renderer supports opaque colored or diffuse-textured triangles with simple face shading and uses OBS's graphics API.
 
 ### Shader renderer
 
@@ -1454,6 +1471,45 @@ with `|`, in any order after the action and control name:
 The controls remain active after the final statement. The engine samples input
 on OBS ticks and republishes the UI only when its appearance changes.
 
+### Responsive layout
+
+Omit `width` and `height` on `!ui | create` to use the scene dimensions
+at Execute. Explicit canvas dimensions create a fixed logical coordinate
+space that OBS scales to the scene. After a live OBS canvas resize, pointer
+input follows the displayed UI. Execute the program again to recalculate the
+layout using the new canvas dimensions.
+
+```text
+!ui | create | name:Menu |+|
+!ui | frame | menu | anchor:center,width:90%,max_width:640,height:200,inset:16,layout:column,gap:10,align:stretch | {
+    !ui | label | title | text:"PAUSED",width:100%,height:36 |+|
+    !ui | frame | actions | width:100%,height:100,layout:row,wrap:true,gap:8 | {
+        !ui | button | resume | text:"Resume",width:140,height:42,grow:1 |+|
+        !ui | button | options | text:"Options",width:140,height:42,grow:1 |+|
+    } |+|
+} |+|
+```
+
+| Attributes | How they work |
+|---|---|
+| `x`, `y`, `width`, `height` | Pixels or an unquoted percentage such as `width:80%`. Horizontal values use the parent content width and vertical values use its height. At the root, values use the UI canvas. |
+| `anchor` | `top_left`, `top`, `top_right`, `left`, `center`, `right`, `bottom_left`, `bottom`, or `bottom_right`. The default is top-left placement. Positive offsets on the right and bottom edges move inward. On a centered axis, offsets move right or down. |
+| `min_width`, `max_width`, `min_height`, `max_height` | Pixel bounds applied to the resolved size. |
+| `inset` | Frame padding in pixels on all four sides. Children are placed and clipped inside this content area. The existing `padding` attribute controls spacing inside widget content, such as a button caption. |
+| `layout` | Frame layout. `absolute` keeps coordinate placement. `row` and `column` arrange direct children in creation order. |
+| `gap`, `wrap` | Frame spacing in pixels between widgets and wrapped lines. With `wrap:true`, a row starts a new row when its next item won't fit. A column starts a new column. Hidden widgets leave the flow. |
+| `align` | Cross-axis alignment in a flow frame. Use `start`, `center`, `end`, or `stretch`. Stretch uses the frame's cross-axis space or the size of the current wrapped line, respecting each widget's maximum. |
+| `justify` | Placement of leftover space along a row or column. Use `start`, `center`, `end`, or `space_between`. |
+| `grow` | Shares remaining space in a flow line after base sizes and gaps. The default is `0`. Two children with `grow:1` receive equal shares until a size maximum is reached. Use percentage sizes or wrapping when space is tight. |
+| `position:absolute` | Removes a child from its parent's flow so it can use its own anchor and offsets. In flow, `x`, `y`, and `anchor` are ignored. |
+| `min_view_width`, `max_view_width` | Inclusive visibility breakpoints in logical UI canvas pixels. Hidden controls leave the layout and stop receiving pointer events. |
+
+Set these attributes on creation or through the widget's command. For example,
+`!menu | width:75%,max_width:560 |+|` reflows its children immediately.
+`!resume | -> | bounds |+|` returns the resolved canvas-space rectangle in
+`bounds.x`, `bounds.y`, `bounds.width`, and `bounds.height`. The same
+layout drives pointer hit testing in the OBS preview and projector.
+
 ### Address a widget by its name
 
 After creating a control, its exact name can be used as a command. Attribute
@@ -1484,7 +1540,7 @@ the same grouped/ungrouped syntax, expressions, validation, and style behavior.
 !my_button | delete |+|            -- delete the widget
 ```
 
-Inputs, frames, checkboxes, sliders, tabs, and labels use the same named form.
+All widget types use the same named form.
 Inputs also support `!field | value | -> | entered`, `!field | value:"New text"`,
 `!field | focus`, `!field | blur`, `!field | paste`, and `!field | copy`.
 A widget's `blur` only clears focus if that widget owns it.
@@ -1510,7 +1566,7 @@ removing/clearing its controls leaves no registered global commands behind.
 `!ui | create` adds/configures a locked pixel renderer named `name` (default
 `UI`). Its output fills the scene dimensions captured by the program's `screen`
 record. `width` and `height` specify the UI drawing resolution and default to
-`screen.width` and `screen.height`, or 960Ãƒâ€”540 when unavailable. Coordinates are
+`screen.width` and `screen.height`, or 960×540 when unavailable. Coordinates are
 in UI canvas pixels, with the origin at the top left. Preview/projector input
 follows the renderer's current OBS scene-item position, scale, alignment,
 rotation, flip, and crop. Moving or
@@ -1630,7 +1686,7 @@ override continues to win. `!ui | set` can change appearance at runtime.
 | `border_width` | Border thickness in UI pixels, default 1. Focus has at least a 2-pixel accent border. |
 | `radius` / `border_radius` | Corner radius in UI pixels, default 6. |
 | `padding` | Text/control inset in UI pixels, default 10. |
-| `font` / `font_family` | `readable` (5Ãƒâ€”7 glyphs, default) or `pixel` (3Ãƒâ€”5 glyphs). |
+| `font` / `font_family` | `readable` (5×7 glyphs, default) or `pixel` (3×5 glyphs). |
 | `scale` / `font_scale` | Whole glyph scale from 1 to 16, default 2. |
 | `font_size` | Pixel size from 1 to 112, rounded to the nearest available 7-pixel-based glyph scale. Prefer `scale` for exact bitmap sizing. |
 
@@ -1650,12 +1706,55 @@ Hyphenated names and numeric `px` suffixes work:
 ```
 
 This is an engine declaration subset, not a browser CSS implementation. It has
-no selectors, external stylesheets, flex/grid layout, animations, percentages,
+no selectors, external stylesheets, browser flex/grid layout, CSS animations,
 font downloads, or CSS shorthand such as `border:1px solid red`. Unknown or
 duplicate properties report an error. Inline `css:` can also specify normal
 control fields such as `width:240px;height:44px`; named styles contain only the
 appearance properties in the table above. Control names and words such as
 `font:readable` are literal; `text`, `value`, and colors can use expressions.
+
+### Scroll, selection, and feedback widgets
+
+| Widget | Main attributes and behavior |
+| --- | --- |
+| `scroll` | A frame with an automatically sized vertical scroll area. Use a child block or `parent:`, and optionally `layout:column`, `gap`, and `inset`. `offset` sets the vertical position in pixels. Children outside the viewport are clipped and cannot be clicked. |
+| `list` | A scrollable list with `items:["Torch","Key","Map"]`, `row_height`, and `value`. The value is the selected 1-based index. |
+| `tree` | A list with a parallel `depths` array. `depths:[0,1,1,0]` describes two roots and two children under the first root. Click the branch indicator or use Left/Right to collapse and expand the focused row. The selected index refers to the original `items` array. |
+| `dropdown` | A compact choice control with `items`, `value`, `row_height`, and `max_rows` (default 6). The popup opens above or below the control. Click outside or press Escape to dismiss it. |
+| `radio` | A vertical group of mutually exclusive options. It uses the same `items`, `value`, and `row_height` fields as a list. |
+| `number` | A numeric field with `min`, `max`, `step`, and `value`. Click minus/plus or use arrow keys to step. Type a value and press Enter to commit it. Escape discards the draft. |
+| `progress` | A read-only bar with `min`, `max`, and `value`. Update it with a named command or `bind:`. |
+| `keybind` | A single-key picker with optional `text` and initial `value`, such as `value:"SPACE"`. Activate it and press a key. Escape cancels. A successful pick emits `submit` with `event.key`. Use the event to update a named input action. |
+| `image`, `icon` | Display a packed sprite created with `!sprite | create`. Use `sprite:SpriteName`. It fits inside the widget and preserves its aspect ratio and transparent pixels. |
+| `modal` | A root-level frame that starts hidden. `open` displays it over the UI and limits widget input to that dialog. `close` or Escape dismisses it. A program can read `!ui | state` to gate its own gameplay input. |
+| `toast` | A temporary message with `text` and `duration` in seconds (default 2.5). It starts hidden. `show` or `open` starts the timer. Showing it again restarts the timer. |
+| `separator` | A horizontal divider colored by `border_color`. |
+| `toggle` | An alias for `checkbox`, with `checked`, `text`, and optional `bind`. |
+
+Use `tooltip:"Explanation"` on a widget to show a short hint after the pointer
+rests on it. Lists, trees, dropdowns, and radio groups accept item arrays from
+variables. Replace them with `!widget | items:new_items |+|`. An empty array
+has selection `0`. If replacing a tree with a differently shaped hierarchy,
+provide its new `depths` in the same command.
+
+Click a scroll frame or focus it with Tab to scroll using Up/Down or Home/End.
+Lists and radio groups use those keys to move selection. Scrollbars support
+track clicks and thumb dragging. Mouse-wheel input uses the Windows OBS wheel
+backend. Scrollbars and keyboard navigation are available with supported pointer
+and key input on other platforms.
+
+```text
+!ui | scroll | options | width:420,height:220,inset:10,layout:column,gap:8,align:stretch | {
+    !ui | dropdown | quality | height:36,items:["Low","High"] |+|
+    !ui | keybind | jump_key | height:36,text:"Jump",value:"SPACE" |+|
+} |+|
+!jump_key | submit | {
+    !input | bind | jump | (event.key) |+|
+} |+|
+!quality | change | {
+    !log | ("Selected "..event.text) |+|
+} |+|
+```
 
 ### Widget event listeners
 
@@ -1675,14 +1774,19 @@ Every control can have listeners. These forms are equivalent:
 | `press` | Left mouse button goes down on the control. |
 | `release` | A captured left press is released, including outside the control. Losing OBS focus cancels capture. |
 | `click` | Press and release finish on the same active control. Buttons/checkboxes also activate with Enter or Space. |
-| `focus`, `blur` | Keyboard focus is gained or lost. Frames and labels do not take keyboard focus. |
-| `change` | A user edits text, toggles a checkbox, moves a slider, or selects a tab. |
-| `submit` | Enter is pressed in a text field. |
+| `focus`, `blur` | Keyboard focus is gained or lost. Interactive controls and scroll frames can take focus. |
+| `change` | The user changes a widget value. |
+| `submit` | Enter confirms a text or number field, or a key picker captures a key. |
+| `open`, `close` | A dropdown popup, modal, or toast opens or closes. |
+| `scroll` | The user moves a scrollable widget. The event includes `offset` and `old_offset` in pixels. |
+| `expand`, `collapse` | A tree branch changes state. The event includes its original `index` and caption as `text`. |
+| `expired` | A toast reaches the end of its duration. |
 
 `event` supplies `kind`, `name`, `value`, `text`, `checked` (1/0), pointer `x/y`
 in the control's UI canvas coordinates, and `dt`. `change` also has `old_value`.
-An input's value is text; a checkbox's value is 1/0; a slider's is numeric; a
-tabs control's is its selected index. Other controls have no value. Callback
+Text inputs and key pickers return strings. Checkboxes return 1/0, number fields,
+sliders, and progress bars return numbers, and choice widgets return selection
+indices. The choice caption is available as `event.text`. Callback
 bodies share the normal script budget, can call functions and yield, and use
 the scope captured when registered. Keep them short. One binding exists per
 control/event; registering again replaces it. Busy callbacks coalesce pending
@@ -1799,6 +1903,76 @@ clicks are discarded on focus loss or replacement of their target window, and
 on Stop/Execute. On Windows, a fresh mouse click that focuses the preview or
 projector is accepted when the button was previously observed up. A button
 already held outside remains blocked until released.
+
+### Named input actions and rebinding
+
+Give a gameplay action a name, then use that name instead of repeating its
+physical keys in game logic. Existing key polling and key listeners still work.
+
+```text
+!var | jumps | 0 |+|
+!input | bind | jump | SPACE | W |+|
+!input | action | jump | press | {
+    !var | jumps | jumps+1 |+|
+} |+|
+!input | action | jump | release | { !log | "Jump released" |+| } |+|
+!input | action | jump | hold | { !log | event.dt |+| } |+|
+
+-- Replace the keys; the same listeners now respond to J or Numpad 1.
+!input | bind | jump | J | NUMPAD1 |+|
+```
+
+| Form | Meaning |
+| --- | --- |
+| `!input \| bind \| jump \| SPACE \| W` | Create or replace `jump` with one or more alternative keys. Key aliases are normalized and duplicates removed. |
+| `!input \| action \| jump \| press/release/hold \| { ... }` | Register one listener for that action/event. Choose one event word. The usual `pressed`, `released`, and `held` aliases also work. |
+| `!input \| action \| jump \| -> \| state` | Poll a detached record with `action`, `key`, `down`, `pressed`, `released`, and `focused`. The positional form `action \| jump \| state` also works. |
+| `!input \| bindings \| jump \| -> \| keys` | Read a detached, 1-based array of normalized key names. `bindings \| jump \| keys` also works. |
+| `!input \| action \| jump \| remove \| press` | Remove only this action's press listener and its active/pending invocation. Omit the final event word to remove all listeners for this action. Keep its key bindings. |
+| `!input \| unbind \| jump` | Remove this action's definition, listeners, and active/pending callbacks. Other actions and raw key listeners remain. |
+
+End each form with `|+|`. The definition's name introduces an identifier:
+letters, digits, underscores, and hyphens, starting with a letter or underscore.
+Names are case-sensitive; `all` is reserved. An existing action identifier wins
+over a same-named variable when selecting the action. Otherwise selectors and
+key arguments may read string variables, or use quoted literals. Define an
+action before registering its listeners or polling it. Definitions belong to
+the running program, including definitions made inside a function.
+
+Alternative keys mean **OR**, not a key chord: the action presses when its first
+eligible key goes down and releases when its last eligible key goes up. Pressing
+or releasing another bound key while one remains down does not repeat these
+edges. Hold runs once per OBS tick, not once per key. Keyboard and mouse-button
+keys, including numpad keys, are supported; controller axes and modifier chords
+are not part of this action API.
+
+Action callbacks receive the usual input-event fields plus `event.action`.
+`event.key` identifies the first active key in binding order, or the most
+recent active key on release. Callback `event.dt`, yielding, coalescing, scope,
+and execution-budget rules match ordinary key listeners. Action listeners share
+the tick's physical input sample with ordinary listeners; registering several
+listeners for one action does not poll its keys separately for each listener.
+
+Polling has an independent per-action history. It does not consume listener
+edges or raw key polling edges. Poll each frame when edges matter; keyboard taps
+between samples can still be missed. Mouse actions require the pointer inside
+the current input preview/viewport, using the existing coordinate and focus
+rules. Actions do not consume UI clicks or prevent another listener from using
+the same key. Bind game actions appropriately when text fields or menus are active.
+
+A key already held when binding, registering the first listener, or regaining
+focus is blocked until released. Blocked keys do not count toward action `down`
+or generate action releases. Focus loss releases an active action once.
+Rebinding validates the full key list before replacing it, cancels that action's
+active/pending callbacks, resets its polling/listener states, and does not emit a
+synthetic release. Listeners remain registered with their original captured
+scope. Release any held new keys before testing the replacement.
+
+`!input | clear | all` and `!events | clear | input` remove both raw-key and
+action listeners, retaining definitions for later use. `!events | clear | all`
+also retains definitions. Stop All, Execute/restart, and unload discard the
+action definitions as well. Without action listeners there is no background
+action polling; a direct action read samples its own keys on demand.
 
 ### Input event handlers
 
@@ -1983,7 +2157,7 @@ For games that use right-button drag over OBS's preview or a **Preview Projector
 
 `!input | wheel | wheel_steps |+|` reads relative mouse-wheel movement while OBS has focus and the pointer is inside its main scene preview or focused Preview Projector after `!input | preview |+|`. Positive values mean wheel up; negative values mean wheel down; `0` means no new movement. Fractional values are possible on high-resolution wheels. Read it once per frame: each read consumes the accumulated movement. On Windows it uses the system DirectInput library through LuaJIT FFI, with no project DLL or Interact window. Wheel polling is not yet implemented on Linux or macOS, where this command returns `0`.
 
-Windows polls the focused OBS main window or Preview Projector; Linux/X11 polls the focused OBS window through the system X11 library. The engine no longer has a command that opens OBS Interact. `!input | viewport | View |+|` remains available if a user manually opens that source's Interact window in OBS. macOS polls Quartz key/button state and maps the main preview or a focused Preview Projector through an isolated Lua state on macOS's asynchronous main queue. It does not require Interact. Live macOS behavior remains unverified. A window cannot receive a key while another window owns keyboard focus. `!onpress | HotkeyName | pressed_label | optional_released_label |+|` is an alternative: it registers an OBS hotkey, which the user binds in OBS Settings Ã¢â€ â€™ Hotkeys.
+Windows polls the focused OBS main window or Preview Projector; Linux/X11 polls the focused OBS window through the system X11 library. The engine no longer has a command that opens OBS Interact. `!input | viewport | View |+|` remains available if a user manually opens that source's Interact window in OBS. macOS polls Quartz key/button state and maps the main preview or a focused Preview Projector through an isolated Lua state on macOS's asynchronous main queue. It does not require Interact. Live macOS behavior remains unverified. A window cannot receive a key while another window owns keyboard focus. `!onpress | HotkeyName | pressed_label | optional_released_label |+|` is an alternative: it registers an OBS hotkey, which the user binds in OBS Settings → Hotkeys.
 
 ### macOS input
 
@@ -1993,7 +2167,7 @@ and button state come from [Quartz Event Services](https://developer.apple.com/d
 OBS's preview geometry is read on its UI thread in an isolated Lua state;
 callbacks do not enter the running program's Lua state from another thread.
 
-Enable **OBS** under **System Settings Ã¢â€ â€™ Privacy & Security Ã¢â€ â€™ Input Monitoring**
+Enable **OBS** under **System Settings → Privacy & Security → Input Monitoring**
 when permission is denied, then restart OBS if macOS requests it. The engine
 checks permission without automatically opening a permission dialog. See
 [Apple's Input Monitoring instructions](https://support.apple.com/en-ca/guide/mac-help/mchl4cedafb6/mac).
@@ -2044,7 +2218,7 @@ has mocked Intel/Apple Silicon coverage; it still needs a live macOS OBS test.
 | `preview_menu` | `block` or `allow` | On Windows, suppress or restore right-click menus in the main preview and Preview Projector for a running game. |
 | `text` | `output_var` | Text typed since the previous read; backspace is returned as `\b`. Empty string means no new text. |
 
-Accepted key names are `A`Ã¢â‚¬â€œ`Z`, `0`Ã¢â‚¬â€œ`9`, `NUMPAD0`Ã¢â‚¬â€œ`NUMPAD9`, `NUMPAD_DECIMAL`, `NUMPAD_ADD`, `NUMPAD_SUBTRACT`, `NUMPAD_MULTIPLY`, `NUMPAD_DIVIDE`, `NUMPAD_SEPARATOR`, `F1`Ã¢â‚¬â€œ`F12`, `UP`, `DOWN`, `LEFT`, `RIGHT`, `HOME`, `END`, `DELETE`, `ENTER`, `SPACE`, `ESCAPE`, `TAB`, `BACKSPACE`, `SHIFT`, `CTRL`, `ALT`, `META`, `MOUSE_LEFT`, `MOUSE_RIGHT`, `MOUSE_MIDDLE`, `MOUSE_X1`, and `MOUSE_X2`. Aliases include `RETURN`, `ESC`, `CONTROL`, `CMD`/`COMMAND` (for `META`), `DEL` (for `DELETE`), `MOUSE1`Ã¢â‚¬â€œ`MOUSE3`, `KP_0`Ã¢â‚¬â€œ`KP_9`, and `NUMPAD_0`Ã¢â‚¬â€œ`NUMPAD_9`. `ENTER` accepts either Enter key; `KP_ENTER` and `NUMPAD_ENTER` are aliases for it. Number-row keys and named keypad digits remain separate when polling.
+Accepted key names are `A`–`Z`, `0`–`9`, `NUMPAD0`–`NUMPAD9`, `NUMPAD_DECIMAL`, `NUMPAD_ADD`, `NUMPAD_SUBTRACT`, `NUMPAD_MULTIPLY`, `NUMPAD_DIVIDE`, `NUMPAD_SEPARATOR`, `F1`–`F12`, `UP`, `DOWN`, `LEFT`, `RIGHT`, `HOME`, `END`, `DELETE`, `ENTER`, `SPACE`, `ESCAPE`, `TAB`, `BACKSPACE`, `SHIFT`, `CTRL`, `ALT`, `META`, `MOUSE_LEFT`, `MOUSE_RIGHT`, `MOUSE_MIDDLE`, `MOUSE_X1`, and `MOUSE_X2`. Aliases include `RETURN`, `ESC`, `CONTROL`, `CMD`/`COMMAND` (for `META`), `DEL` (for `DELETE`), `MOUSE1`–`MOUSE3`, `KP_0`–`KP_9`, and `NUMPAD_0`–`NUMPAD_9`. `ENTER` accepts either Enter key; `KP_ENTER` and `NUMPAD_ENTER` are aliases for it. Number-row keys and named keypad digits remain separate when polling.
 
 ```text
 !input | keys | controls | NUMPAD1 | NUMPAD_DECIMAL | ENTER |+|
@@ -2102,7 +2276,7 @@ GPU execution time. Single commands/native uploads still cannot yield midway.
 | Field | Meaning |
 | --- | --- |
 | `ready`, `ticks` | Numeric readiness flag and completed active tick count since Execute. |
-| `tick_ms`, `budget_ms`, `budget_percent` | Measured tick duration, its configured budget, and duration/budget Ãƒâ€” 100. Percent can exceed 100. |
+| `tick_ms`, `budget_ms`, `budget_percent` | Measured tick duration, its configured budget, and duration/budget × 100. Percent can exceed 100. |
 | `events_ms` | Input sampling, networking, observers, and event scheduling, excluding animation. |
 | `animation_ms`, `async_ms`, `main_ms` | Automatic animation, cooperative tasks, and main commands. |
 | `collision_ms`, `ui_ms`, `background_ms`, `cleanup_ms` | Collision work, UI rendering, deferred work, and end-of-program connection/input cleanup. |
@@ -2334,7 +2508,7 @@ Create a reusable OBS media source from an audio file, then play it by name:
 !sound | delete | ClickSound |+|
 ```
 
-Creation accepts `name`, `file`, optional `volume` (0Ã¢â‚¬â€œ1, default 0.5), and
+Creation accepts `name`, `file`, optional `volume` (0–1, default 0.5), and
 `monitor` (boolean, default false), grouped or separated by pipes. Relative
 file paths follow the main program directory in File output mode and the engine
 directory in Text/Input mode. The file must exist. OBS's bundled media source
@@ -3080,7 +3254,7 @@ modules you trust.
 
 ## Command reference
 
-This index covers the engine's public command families. `[Ã¢â‚¬Â¦]` means optional; `name`/`label` are programmer-chosen identifiers. `|+|` ends each statement, even when omitted from a compact signature below. Internal compiler commands beginning `__` are not program APIs. A module may register additional commands, but those are not part of the core language.
+This index covers the engine's public command families. `[…]` means optional; `name`/`label` are programmer-chosen identifiers. `|+|` ends each statement, even when omitted from a compact signature below. Internal compiler commands beginning `__` are not program APIs. A module may register additional commands, but those are not part of the core language.
 
 ### State, flow, and diagnostics
 
@@ -3134,7 +3308,7 @@ This index covers the engine's public command families. `[Ã¢â‚¬Â¦]` mean
 | Command | Form / effect |
 | --- | --- |
 | `!ui` | Persistent `frame`/`panel`/`box`, `label`, `button`, `input`, `checkbox`, `slider`, `tabs`; named styles/CSS declarations, bindings, listeners, getters, and cleanup. `use \| canvas_name` selects an existing UI canvas. See [UI controls](#ui-controls). |
-| `!input` | `press/release/hold \| key \| { ... }`, `remove \| key`, `clear \| all`; also `key`, `mouse`, `pointer`, `recenter`, `wheel`, `focus`, `status`, `snapshot`, `keys`, `text`, `preview`, `preview_menu`, `viewport`. Older `off` works. See [input](#input-and-timing). |
+| `!input` | `press/release/hold \| key \| { ... }`, `remove \| key`, `clear \| all`; named actions: `bind`, `action`, `bindings`, `unbind`; also `key`, `mouse`, `pointer`, `recenter`, `wheel`, `focus`, `status`, `snapshot`, `keys`, `text`, `preview`, `preview_menu`, `viewport`. Older `off` works. See [input](#input-and-timing). |
 | `!runtime` | `stats`, `timings`, `diagnostics`, or `preload`, followed by `-> \| variable` or `into:variable`; read resource counts, completed tick/job timings, command profiles, or preload metadata. See [runtime diagnostics](#runtime-diagnostics) and [model preloading](#model-preloading). |
 | `!events` | `clear \| all`, or `remove \| family \| [selector] \| [event_kind]`; remove block handlers. Older `off` works. See [event handlers](#event-handlers). |
 | `!projector` | `fullscreen \| [monitor:index]`; Windows `controls \| escape:game/default,exit_key:F11` and `close`; configurable game/projector keys and focused-projector closure. |
@@ -3184,7 +3358,7 @@ positions. It returns a fresh record and does not modify either input.
 | Returned field | Meaning |
 | --- | --- |
 | `hit` | `1` if the swept circles overlap or touch, otherwise `0`. |
-| `time` | First contact as a fraction of the step (`0`Ã¢â‚¬â€œ`1`); `0` when already touching/overlapping, `1` on a miss. |
+| `time` | First contact as a fraction of the step (`0`–`1`); `0` when already touching/overlapping, `1` on a miss. |
 | `normal_x`, `normal_y`, `normal_z` | Contact unit normal pointing from the second circle towards the first. Unused axes are zero; coincident centres use positive X. Zero on a miss. |
 | `penetration` | Nonnegative separation needed along the contact normal to keep the end positions on their original sides. It can stay positive after a complete crossing, or be zero for a tangent or circles already separating. |
 | `correction_x`, `correction_y`, `correction_z` | Half that overlap along the normal. For equal sharing, add this vector to the first circle and subtract it from the second. Zero on a miss. |
