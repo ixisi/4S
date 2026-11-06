@@ -1403,7 +1403,7 @@ function compile_line(cmd, args)
                     elseif action=="text" or action=="wheel" or action=="focus" or action=="recenter" or action=="status" then
                         if #args~=1 then result_error="Omit the positional output variable when using ->"
                         else args[2]=result_target end
-                    elseif action=="key" or action=="mouse" then
+                    elseif action=="key" or action=="mouse" or action=="action" or action=="bindings" then
                         if #args~=2 then result_error="Expected input | "..action.." | key | -> | variable"
                         else args._result_target=result_target end
                     elseif action=="pointer" then
@@ -9949,6 +9949,10 @@ function input_host.clear_pending(ctx)
     ctx.input_watched_mouse=nil;ctx.input_pending_mouse=nil;ctx.input_mouse_sampler=nil
     ctx.input_previous=nil;ctx.input_blocked=nil;ctx.input_mouse_physical=nil
     ctx.input_focused=false;ctx.input_mouse_inside=false
+    for _,action in pairs(ctx.input_actions or {}) do
+        action.events={blocked={},down=false}
+        action.poll={blocked={},down=false}
+    end
 end
 input_projector_controls_command=function(ctx,args)
     local action=tostring(args[1]):lower()
@@ -10015,7 +10019,7 @@ end
 function INPUT_EVENTS.is_handler(cmd,args)
     local action=args[1];local block=type(args[#args])=='string' and args[#args]:match('^%s*%b{}%s*$')
     if cmd=='input' then
-        return INPUT_EVENTS.kinds[action] or block and
+        return action=='action' and INPUT_EVENTS.kinds[args[3]] or INPUT_EVENTS.kinds[action] or block and
             ({move=true,pointer_move=true,mouse_move=true,wheel=true,text=true,focus=true})[action]
     elseif cmd=='change' or cmd=='collision' then return block
     elseif cmd=='worker' then return ({done=true,error=true,cancelled=true,finished=true})[action]
@@ -10036,7 +10040,11 @@ function INPUT_EVENTS.compile(ctx,args,line,command,cmd)
     local valid=body:match('^%b{}$')~=nil
     if cmd=='input' then
         code.kind=INPUT_EVENTS.kinds[action] or ({pointer_move='move',mouse_move='move'})[action] or action
-        if INPUT_EVENTS.kinds[action] then
+        if action=='action' then
+            code.family='input_action';code.kind=INPUT_EVENTS.kinds[args[3]]
+            code.selector=args[2];code.key=args[2]
+            valid=valid and #args==4 and code.kind~=nil and type(code.key)=='string' and code.key~=''
+        elseif INPUT_EVENTS.kinds[action] then
             code.selector=args[2]
             code.key=input_name(args[2]) or args[2];valid=valid and #args==3 and type(code.key)=='string' and code.key~=''
         elseif code.kind=='focus' then
@@ -10084,6 +10092,121 @@ function INPUT_EVENTS.value(ctx,binding,path,literal)
     if not ok or is_fatal(value) then return literal and safe_trim(path or '') or nil end
     return value
 end
+-- Named actions aggregate alternative physical keys. Polling and listeners have
+-- separate histories; action listeners share the ordinary tick's native sample.
+function INPUT_EVENTS.action_sample(ctx,action,channel)
+    local history=channel.history or {};channel.history=history
+    history.input_window=ctx.input_window or history.input_window
+    history.input_preview,history.input_viewport=ctx.input_preview,ctx.input_viewport
+    history.input_event_owner=ctx
+    local pointer=false
+    for _,key in ipairs(action.keys) do if key:sub(1,6)=='MOUSE_' then pointer=true;break end end
+    local sample,why=input_poll(history,action.keys,pointer)
+    if not sample then return nil,why end
+    return sample,history
+end
+function INPUT_EVENTS.action_baseline(action,sample)
+    local channel={blocked={},down=false}
+    for _,key in ipairs(action.keys) do channel.blocked[key]=sample.keys[key].down end
+    return channel
+end
+function INPUT_EVENTS.action_state(action,channel,sample,history)
+    local down,key=false,channel.key or ''
+    channel.blocked=channel.blocked or {}
+    for _,name in ipairs(action.keys) do
+        local state=sample.keys[name]
+        if state then
+            if channel.blocked[name]==nil then channel.blocked[name]=state.down end
+            if not state.down then channel.blocked[name]=false end
+            if state.down and not channel.blocked[name] and not (history.input_blocked or {})[name] then
+                if not down then key=name end
+                down=true
+            end
+        end
+    end
+    local value={down=down and 1 or 0,pressed=down and not channel.down and 1 or 0,
+        released=not down and channel.down and 1 or 0,focused=sample.focused and 1 or 0,key=key}
+    channel.down,channel.key=down,key
+    return value
+end
+function INPUT_EVENTS.action_command(ctx,args)
+    local operation=args[1]
+    local raw=safe_trim(args[2] or '')
+    local name,why
+    if operation=='bind' then
+        -- Declarations introduce identifiers, just like widget/function names.
+        name=raw:match('^"(.*)"$') or raw:match("^'(.*)'$") or raw
+    elseif ctx.input_actions and ctx.input_actions[raw] then name=raw
+    else name,why=resolve_command_text(ctx,raw) end
+    if not name or not name:match('^[%a_][%w_%-]*$') or name=='all' then
+        return false,'Input Error: Expected an action identifier (all is reserved)'..(why and ': '..why or '')
+    end
+    if operation=='bind' then
+        if #args<3 then return false,'Input Error: Expected bind | action_name | key | optional more keys' end
+        local action={keys={}};local seen={}
+        for index=3,#args do
+            local value,problem=resolve_command_text(ctx,args[index])
+            if not value then return false,'Input Error: '..tostring(problem) end
+            local key=input_name(value)
+            if not key then return false,"Input Error: Unknown input key '"..tostring(value).."'" end
+            if not seen[key] then action.keys[#action.keys+1]=key;seen[key]=true end
+        end
+        action.poll={}
+        local sample,history=INPUT_EVENTS.action_sample(ctx,action,action.poll)
+        if not sample then return false,'Input Error: '..tostring(history) end
+        action.events=INPUT_EVENTS.action_baseline(action,sample)
+        local polling=INPUT_EVENTS.action_baseline(action,sample);polling.history=history;action.poll=polling
+        -- Commit only after every key and the initial sample have succeeded.
+        ctx.input_actions=ctx.input_actions or {};ctx.input_actions[name]=action
+        for _,binding in pairs(ctx.input_handlers or {}) do
+            if binding.code.family=='input_action' and binding.code.key==name then
+                INPUT_EVENTS.cancel(ctx,binding);ctx.input_handlers[binding.id]=binding
+            end
+        end
+        -- Seed new physical keys now, so a press before the next tick is visible.
+        local shared=ctx.input_event_poll or {};ctx.input_event_poll=shared
+        shared.input_window=ctx.input_window or shared.input_window
+        shared.input_preview,shared.input_viewport=ctx.input_preview,ctx.input_viewport
+        shared.input_previous=shared.input_previous or {};shared.input_blocked=shared.input_blocked or {}
+        shared.input_mouse_physical=shared.input_mouse_physical or {}
+        for _,key in ipairs(action.keys) do
+            if shared.input_previous[key]==nil then
+                shared.input_previous[key]=history.input_previous[key]
+                shared.input_blocked[key]=history.input_blocked[key]
+                shared.input_mouse_physical[key]=history.input_mouse_physical[key]
+            end
+        end
+        if shared.input_focused==nil then shared.input_focused=history.input_focused end
+        if shared.input_mouse_inside==nil then shared.input_mouse_inside=history.input_mouse_inside end
+        return true
+    end
+    local action=ctx.input_actions and ctx.input_actions[name]
+    if not action then return false,"Input Error: No action named '"..name.."'; use !input | bind first" end
+    if operation=='unbind' then
+        if #args~=2 then return false,'Input Error: Expected unbind | action_name' end
+        INPUT_EVENTS.off(ctx,'input_action',name);ctx.input_actions[name]=nil
+        if not next(ctx.input_actions) then ctx.input_actions=nil end
+        return true
+    end
+    if operation=='action' and args[3]=='remove' then
+        local kind=args[4] and INPUT_EVENTS.kinds[args[4]]
+        if #args>4 or args[4] and not kind then return false,'Input Error: Expected action | name | remove | optional press, release, or hold' end
+        INPUT_EVENTS.off(ctx,'input_action',name,kind);return true
+    end
+    if #args~=(args._result_target and 2 or 3) or not (args._result_target or args[3]) then
+        return false,'Input Error: Expected '..operation..' | action_name | -> | output_variable'
+    end
+    local value
+    if operation=='bindings' then value={};for i,key in ipairs(action.keys) do value[i]=key end
+    else
+        local sample,history=INPUT_EVENTS.action_sample(ctx,action,action.poll)
+        if not sample then return false,'Input Error: '..tostring(history) end
+        value=INPUT_EVENTS.action_state(action,action.poll,sample,history);value.action=name
+    end
+    local written=update_variable_state(ctx,tostring(args._result_target or args[3]),value)
+    if is_fatal(written) then return false,written.msg end
+    return true
+end
 function INPUT_EVENTS.register(ctx,args,cmd)
     cmd=cmd or 'input'
     local code=args._input_handler
@@ -10094,18 +10217,44 @@ function INPUT_EVENTS.register(ctx,args,cmd)
     end
     if code.selector then
         local ui=ctx.ui_state
-        local value=code.family=='ui' and ui and ui.widgets[code.selector] and code.selector or
+        local value=code.family=='input_action' and ctx.input_actions and ctx.input_actions[code.selector] and code.selector or
+            code.family=='ui' and ui and ui.widgets[code.selector] and code.selector or
             resolve_command_value(ctx,code.selector)
         if is_fatal(value) then return false,'Event Error: '..tostring(value.msg) end
         -- Worker/connection records also live in variables bearing their ID.
         -- Those records identify a resource; they are not replacement ID text.
-        if type(value)=='table' and code.family~='ui' and code.family~='input' then value=code.selector end
+        if type(value)=='table' and code.family~='ui' and code.family~='input' and code.family~='input_action' then value=code.selector end
         if type(value)~='string' and type(value)~='number' then return false,'Event Error: Expected a text selector' end
         local bound={};for key,item in pairs(code) do bound[key]=item end;code=bound
         code.key=tostring(value);code.target=code.key
         if code.family=='input' then
             code.key=input_name(code.key)
             if not code.key then return false,'Input Error: Unknown input key '..tostring(value) end
+        end
+    end
+    if code.family=='input_action' then
+        local action=ctx.input_actions and ctx.input_actions[code.key]
+        if not action then return false,"Input Error: No action named '"..tostring(code.key).."'; use !input | bind first" end
+        local exists=false
+        for _,binding in pairs(ctx.input_handlers or {}) do
+            if binding.code.family=='input_action' and binding.code.key==code.key then exists=true;break end
+        end
+        if not exists then
+            local sample,history=INPUT_EVENTS.action_sample(ctx,action,{})
+            if not sample then return false,'Input Error: '..tostring(history) end
+            action.events=INPUT_EVENTS.action_baseline(action,sample)
+        end
+        local history=ctx.input_event_poll or {};ctx.input_event_poll=history
+        history.input_window=ctx.input_window or history.input_window
+        history.input_preview,history.input_viewport=ctx.input_preview,ctx.input_viewport
+        local missing={};local pointer=false
+        for _,key in ipairs(action.keys) do
+            if not history.input_previous or history.input_previous[key]==nil then missing[#missing+1]=key end
+            if key:sub(1,6)=='MOUSE_' then pointer=true end
+        end
+        if #missing>0 then
+            local sample,why=input_poll(history,missing,pointer)
+            if not sample then return false,'Input Error: '..tostring(why) end
         end
     end
     if code.family=='input' then
@@ -10185,7 +10334,7 @@ function INPUT_EVENTS.dispatch(ctx,binding)
     ctx.async_tasks=ctx.async_tasks or {};ctx.async_tasks[#ctx.async_tasks+1]=task
 end
 function INPUT_EVENTS.enabled(ctx,kind)
-    if kind=='text' and ctx.ui_state then return true end
+    if ctx.ui_state and (kind=='text' or kind=='wheel' and (ctx.ui_state.wheel_widgets or 0)>0) then return true end
     for _,b in pairs(ctx.input_handlers or {}) do
         if b.code.family=='input' and b.code.kind==kind then return true end
     end
@@ -10209,6 +10358,7 @@ end
 function INPUT_EVENTS.poll(ctx,seconds,deadline)
     if not next(ctx.input_handlers or {}) and not ctx.ui_state then return true end
     local bindings,inputs,requested,seen={},{},{},{}
+    local actions
     local pointer=false
     local alive={};for _,task in ipairs(ctx.async_tasks or {}) do alive[task]=not task.cancelled end
     for _,binding in pairs(ctx.input_handlers or {}) do
@@ -10219,6 +10369,16 @@ function INPUT_EVENTS.poll(ctx,seconds,deadline)
             inputs[#inputs+1]=binding
             if input_name(code.key) and not seen[code.key] then requested[#requested+1]=code.key;seen[code.key]=true end
             if code.key:sub(1,6)=='MOUSE_' or code.kind=='move' or code.kind=='wheel' then pointer=true end
+        elseif code.family=='input_action' then
+            local action=ctx.input_actions and ctx.input_actions[code.key]
+            if action then
+                actions=actions or {}
+                actions[code.key]=action
+                for _,key in ipairs(action.keys) do
+                    if not seen[key] then requested[#requested+1]=key;seen[key]=true end
+                    if key:sub(1,6)=='MOUSE_' then pointer=true end
+                end
+            end
         end
     end
     table.sort(bindings,function(a,b) return a.serial<b.serial end)
@@ -10227,9 +10387,14 @@ function INPUT_EVENTS.poll(ctx,seconds,deadline)
         for _,key in ipairs(ENGINE_UI.keys) do
             if not seen[key] then requested[#requested+1]=key;seen[key]=true end
         end
+        if ctx.ui_state.key_capture then
+            for _,key in ipairs(ENGINE_UI.pick_keys) do
+                if not seen[key] then requested[#requested+1]=key;seen[key]=true end
+            end
+        end
         pointer=true
     end
-    if #inputs>0 or ctx.ui_state then
+    if #inputs>0 or actions or ctx.ui_state then
         local history=ctx.input_event_poll or {};ctx.input_event_poll=history
         history.input_window=ctx.input_window or history.input_window;history.input_preview=ctx.input_preview;history.input_viewport=ctx.input_viewport
         history.input_event_owner=ctx
@@ -10237,10 +10402,19 @@ function INPUT_EVENTS.poll(ctx,seconds,deadline)
         history.type_registry=history.type_registry or {}
         local sample,err=input_poll(history,requested,pointer)
         if not sample then return false,'Input Error: '..tostring(err) end
+        local ui_sample
+        if ctx.ui_state then
+            ui_sample,err=ENGINE_UI.scene_sample(ctx,sample)
+            if not ui_sample then return false,err end
+        end
         local wheel,text=0,''
+        local ui_wheel
         for kind,buffers in pairs(ctx.input_event_streams or {}) do buffers.poll=kind=='wheel' and 0 or '' end
         if INPUT_EVENTS.enabled(ctx,'wheel') then
+            if ui_sample and (ctx.ui_state.wheel_widgets or 0)>0 then history._ui_wheel_sample=ui_sample end
             local ok,why=engine.input(history,{}, {'wheel','_event_wheel'})
+            ui_wheel=history._ui_wheel_value
+            history._ui_wheel_sample,history._ui_wheel_value=nil,nil
             if not ok then return false,why end
             wheel=history.active_scope._event_wheel
         end
@@ -10249,10 +10423,26 @@ function INPUT_EVENTS.poll(ctx,seconds,deadline)
             if not ok then return false,why end
             text=history.active_scope._event_text
         end
-        if ctx.ui_state then
-            local ui_sample,why=ENGINE_UI.scene_sample(ctx,sample)
-            if not ui_sample then return false,why end
-            ENGINE_UI.poll(ctx,ui_sample,text,dt)
+        if ui_sample then ENGINE_UI.poll(ctx,ui_sample,text,dt,wheel~=0 and wheel or ui_wheel or 0) end
+        if actions then
+            local action_states={}
+            for name,action in pairs(actions) do
+                action_states[name]=INPUT_EVENTS.action_state(action,action.events,sample,history)
+            end
+            for _,binding in ipairs(bindings) do
+                local code=binding.code
+                if code.family=='input_action' then
+                    local value=action_states[code.key]
+                    if value then
+                        local field=code.kind=='press' and 'pressed' or code.kind=='release' and 'released' or 'down'
+                        if value[field]==1 then
+                            INPUT_EVENTS.emit(binding,{kind=code.kind,action=code.key,key=value.key,dt=dt,
+                                down=value.down,pressed=value.pressed,released=value.released,focused=value.focused,
+                                mouse_inside=sample.mouse_inside and 1 or 0,x=sample.x,y=sample.y})
+                        elseif code.kind=='hold' then binding.pending=nil end
+                    end
+                end
+            end
         end
         for _,binding in ipairs(inputs) do
             local code=binding.code;local state=sample.keys[code.key]
@@ -10284,7 +10474,7 @@ function INPUT_EVENTS.poll(ctx,seconds,deadline)
     for offset=0,#bindings-1 do
         local index=(first+offset-1)%#bindings+1;local binding=bindings[index]
         if offset>0 and deadline and engine_tick_now_ms()>=deadline then ctx.event_cursor=index-1;break end
-        if binding.code.family~='input' and INPUT_EVENTS.collect then INPUT_EVENTS.collect(ctx,binding,dt) end
+        if binding.code.family~='input' and binding.code.family~='input_action' and INPUT_EVENTS.collect then INPUT_EVENTS.collect(ctx,binding,dt) end
         INPUT_EVENTS.dispatch(ctx,binding)
         ctx.event_cursor=index
     end
@@ -10293,11 +10483,13 @@ end
 function INPUT_EVENTS.off(ctx,family,key,kind)
     for _,binding in pairs(ctx.input_handlers or {}) do
         local code=binding.code
-        if (family=='all' or code.family==family) and (not key or code.key==key or binding.endpoint==key) and
+        if (family=='all' or code.family==family or family=='input' and code.family=='input_action') and (not key or code.key==key or binding.endpoint==key) and
            (not kind or code.kind==kind) then INPUT_EVENTS.cancel(ctx,binding) end
     end
     local input_remains=false
-    for _,binding in pairs(ctx.input_handlers or {}) do if binding.code.family=='input' then input_remains=true;break end end
+    for _,binding in pairs(ctx.input_handlers or {}) do
+        if binding.code.family=='input' or binding.code.family=='input_action' then input_remains=true;break end
+    end
     if not input_remains and not ctx.ui_state then ctx.input_event_streams=nil;ctx.input_event_poll=nil end
 end
 engine.events=function(ctx,state,args)
@@ -10351,6 +10543,9 @@ for _,key in ipairs({
 engine["input"] = function(ctx,state,args)
     local action=tostring(args[1] or "")
     if args._input_handler or INPUT_EVENTS.is_handler('input',args) then return INPUT_EVENTS.register(ctx,args) end
+    if action=='bind' or action=='unbind' or action=='action' or action=='bindings' then
+        return INPUT_EVENTS.action_command(ctx,args)
+    end
     local first,last
     if action=='key' or action=='mouse' or action=='remove' or action=='clear' or action=='off' then first,last=2,2
     elseif action=='snapshot' or action=='keys' then first,last=3,#args end
@@ -10531,8 +10726,10 @@ engine["input"] = function(ctx,state,args)
         local sample,err=input_poll(ctx,{},true)
         if not sample then return false,"Input Error: " .. tostring(err) end
         local delta=0
-        if host_os=="Windows" and sample.focused then
-            local raw=input_host.wheel_delta(ctx.input_active_window or ctx.input_window)
+        local ui=ctx._ui_wheel_sample
+        local ui_inside=ui and ui.focused and ui.mouse_inside
+        if host_os=="Windows" and (sample.focused or ui_inside) then
+            local raw=input_host.wheel_delta(ui_inside and ui._ui_window or ctx.input_active_window or ctx.input_window)
             if input_wheel_attempted and not input_wheel_device and
                not input_wheel_warned then
                 input_wheel_warned=true
@@ -10540,7 +10737,8 @@ engine["input"] = function(ctx,state,args)
                     "[4IM3-SCRIPT] Mouse wheel input is unavailable: " ..
                     "Windows DirectInput could not open the system mouse")
             end
-            if sample.mouse_inside then delta=raw end
+            if ui_inside then ctx._ui_wheel_value=raw end
+            if sample.focused and sample.mouse_inside then delta=raw end
         end
         delta=INPUT_EVENTS.stream(ctx,'wheel',delta)
         if not sample.focused or not sample.mouse_inside then delta=0 end
@@ -10577,7 +10775,7 @@ engine["input"] = function(ctx,state,args)
             end
         end
     else
-        return false,"Input Error: Expected key, mouse, pointer, recenter, focus, status, snapshot, keys, text, wheel, preview, preview_menu, viewport, press, release, hold, remove, or clear"
+        return false,"Input Error: Expected key, mouse, pointer, recenter, focus, status, snapshot, keys, text, wheel, preview, preview_menu, viewport, press, release, hold, remove, clear, bind, action, bindings, or unbind"
     end
     local requested=key and {key} or {}
     if action=="snapshot" or action=="keys" then
@@ -11312,6 +11510,11 @@ engine["sprite"] = function(ctx, state, args)
         ctx.sprite_states = ctx.sprite_states or {}
         ctx.sprite_states[name] = {w = width, h = height,
                                    palette = palette, pixels = pixels}
+        if ctx.ui_state and ctx.ui_state.order then
+            for _,widget in ipairs(ctx.ui_state.order) do
+                if widget.kind=='image' and widget.sprite==name then widget.surface.dirty=true end
+            end
+        end
         return true
     elseif action == "draw" then
         local fields, err = packed_fields(args, action, {"name", "x", "y"})
@@ -11449,19 +11652,41 @@ end
 
 -- Retained, program-owned controls. A UI owns a separate transparent pixel
 -- canvas, so redrawing controls never clears a game's canvas or 3D scene.
-ENGINE_UI={keys={'MOUSE_LEFT','TAB','ENTER','SPACE','LEFT','RIGHT','HOME','END','DELETE','BACKSPACE','SHIFT','CTRL','A','C','V','X'},
-    kinds={panel=true,label=true,button=true,input=true,checkbox=true,slider=true,tabs=true},
-    events={click=true,press=true,release=true,mouse_enter=true,mouse_leave=true,change=true,submit=true,focus=true,blur=true},
+ENGINE_UI={keys={'MOUSE_LEFT','TAB','ENTER','SPACE','LEFT','RIGHT','UP','DOWN','ESCAPE','HOME','END','DELETE','BACKSPACE','SHIFT','CTRL','A','C','V','X'},
+    kinds={panel=true,label=true,button=true,input=true,checkbox=true,slider=true,tabs=true,scroll=true,modal=true,
+        toast=true,list=true,tree=true,dropdown=true,radio=true,number=true,progress=true,image=true,keybind=true,separator=true},
+    containers={panel=true,scroll=true,modal=true},
+    choices={tabs=true,list=true,tree=true,dropdown=true,radio=true},
+    scrollable={scroll=true,list=true,tree=true,radio=true,dropdown=true},
+    valued={input=true,checkbox=true,slider=true,tabs=true,list=true,tree=true,dropdown=true,radio=true,number=true,progress=true,keybind=true},
+    passive={panel=true,modal=true,label=true,progress=true,image=true,toast=true,separator=true},
+    events={click=true,press=true,release=true,mouse_enter=true,mouse_leave=true,change=true,submit=true,focus=true,blur=true,
+        open=true,close=true,scroll=true,expand=true,collapse=true,expired=true},
     defaults={background='#172334',hover_color='#294259',pressed_color='#375874',
         text_color='#EDF4FF',accent='#55C8E8',disabled_color='#566174',border_color='#34485F',
         border_width=1,radius=6,scale=2,padding=10},
-    numbers={x=true,y=true,width=true,height=true,scale=true,font_size=true,padding=true,radius=true,border_width=true,min=true,max=true,step=true,max_length=true,tab=true},
-    booleans={visible=true,enabled=true,checked=true,password=true},
+    numbers={x=true,y=true,width=true,height=true,scale=true,font_size=true,padding=true,radius=true,border_width=true,min=true,max=true,step=true,max_length=true,tab=true,
+        min_width=true,max_width=true,min_height=true,max_height=true,inset=true,gap=true,grow=true,min_view_width=true,max_view_width=true,
+        row_height=true,offset=true,duration=true,max_rows=true},
+    relative={x=true,y=true,width=true,height=true},
+    booleans={visible=true,enabled=true,checked=true,password=true,wrap=true},
+    placement={
+        placement_anchor={top_left=true,top=true,top_right=true,left=true,center=true,right=true,bottom_left=true,bottom=true,bottom_right=true},
+        layout={absolute=true,row=true,column=true},
+        position={flow=true,absolute=true},
+        align={start=true,center=true,['end']=true,stretch=true},
+        justify={start=true,center=true,['end']=true,space_between=true}},
     colors={background=true,hover_color=true,pressed_color=true,text_color=true,accent=true,disabled_color=true,border_color=true},
     strings={text=true,placeholder=true,value=true},
-    words={name=true,parent=true,bind=true,font=true,style=true,tabs=true},
+    words={name=true,parent=true,bind=true,font=true,style=true,tabs=true,sprite=true},
     aliases={color='text_color',background_color='background',hover='hover_color',pressed='pressed_color',
-        border_radius='radius',font_family='font',font_scale='scale'}}
+        border_radius='radius',font_family='font',font_scale='scale',anchor='placement_anchor'}}
+function ENGINE_UI.is_pick_key(key)
+    return key and not key:match('^MOUSE_') and key~='ESCAPE' and key~='SHIFT' and key~='CTRL' and key~='ALT' and key~='META'
+end
+ENGINE_UI.layout_fields={x=true,y=true,width=true,height=true,placement_anchor=true,position=true,min_width=true,max_width=true,
+    min_height=true,max_height=true,grow=true,min_view_width=true,max_view_width=true,layout=true,inset=true,gap=true,
+    wrap=true,align=true,justify=true,visible=true,enabled=true,offset=true}
 function ENGINE_UI.attributes(ctx,args,first,allowed)
     local result,expanded={},{}
     for i=first,#args do
@@ -11497,19 +11722,30 @@ function ENGINE_UI.attributes(ctx,args,first,allowed)
                 return nil,'Unknown, duplicate, or empty attribute: '..tostring(key or part)
             end
             local value
-            if key=='items' then
+            if key=='items' or key=='depths' then
                 local value=(raw:sub(1,1)=='[' or raw:sub(1,1)=='{') and parse_table_literal(ctx,raw) or resolve_path(ctx,raw)
-                if type(value)~='table' or is_fatal(value) or #value==0 then return nil,'items must be a nonempty list of tab captions' end
+                if type(value)~='table' or is_fatal(value) then return nil,key..' must be a list' end
+                local item_type=key=='items' and 'string' or 'number'
                 local count=0;for k,item in pairs(value) do
-                    if type(k)~='number' or k%1~=0 or k<1 or k>#value or type(item)~='string' then return nil,'items must be a dense list of text captions' end
+                    if type(k)~='number' or k%1~=0 or k<1 or k>#value or type(item)~=item_type then
+                        return nil,key..' must be a dense list of '..item_type..' values'
+                    end
                     count=count+1
                 end
-                if count~=#value then return nil,'items must be a dense list' end
-                value={unpack(value)}
-                result[key]=value
+                if count~=#value then return nil,key..' must be a dense list' end
+                local copy={};for i,item in ipairs(value) do copy[i]=item end
+                result[key]=copy
             elseif ENGINE_UI.numbers[key] then
-                value=evaluate_math(ctx,raw)
+                local percent=allowed.placement_anchor and ENGINE_UI.relative[key] and raw:match('^([+-]?[%d.]+)%%$')
+                value=percent and tonumber(percent) or evaluate_math(ctx,raw)
                 if type(value)~='number' or value~=value or math.abs(value)==math.huge then return nil,key..' must be a finite number' end
+                if percent then value={fraction=value/100} end
+            elseif ENGINE_UI.placement[key] then
+                local why
+                value,why=resolve_command_text(ctx,raw)
+                if not value then return nil,why end
+                value=value:lower():gsub('%-','_')
+                if not ENGINE_UI.placement[key][value] then return nil,'Invalid '..(key=='placement_anchor' and 'anchor' or key)..': '..value end
             elseif ENGINE_UI.booleans[key] then
                 if raw=='true' or raw=='1' then value=true elseif raw=='false' or raw=='0' then value=false
                 else value=resolve_path(ctx,raw);if is_fatal(value) then return nil,value.msg end
@@ -11535,7 +11771,7 @@ function ENGINE_UI.attributes(ctx,args,first,allowed)
                     if not tostring(value):match('^#%x%x%x%x%x%x$') then return nil,key..' must be a quoted #RRGGBB color' end
                 else value=tostring(value) end
             end
-            if key~='items' then result[key]=value end
+            if key~='items' and key~='depths' then result[key]=value end
     end
     return result
 end
@@ -11553,24 +11789,59 @@ end
 function ENGINE_UI.allowed(kind)
     local fields={x=true,y=true,width=true,height=true,visible=true,enabled=true,parent=true,font=true,
         scale=true,padding=true,background=true,hover_color=true,pressed_color=true,text_color=true,accent=true,
-        disabled_color=true,border_color=true,border_width=true,radius=true,style=true,tabs=true,tab=true}
-    if kind=='button' or kind=='label' or kind=='checkbox' then fields.text=true end
+        disabled_color=true,border_color=true,border_width=true,radius=true,style=true,tabs=true,tab=true,
+        placement_anchor=true,position=true,min_width=true,max_width=true,min_height=true,max_height=true,
+        grow=true,min_view_width=true,max_view_width=true,tooltip=true}
+    if ENGINE_UI.containers[kind] then fields.layout=true;fields.inset=true;fields.gap=true;fields.wrap=true;fields.align=true;fields.justify=true end
+    if kind=='button' or kind=='label' or kind=='checkbox' or kind=='toast' or kind=='keybind' then fields.text=true end
     if kind=='input' then fields.value=true;fields.placeholder=true;fields.password=true;fields.max_length=true;fields.bind=true end
     if kind=='checkbox' then fields.checked=true;fields.bind=true end
-    if kind=='slider' then fields.value=true;fields.min=true;fields.max=true;fields.step=true;fields.bind=true end
-    if kind=='tabs' then fields.items=true;fields.value=true;fields.bind=true end
+    if kind=='slider' or kind=='number' or kind=='progress' then
+        fields.value=true;fields.min=true;fields.max=true;fields.step=kind~='progress';fields.bind=true
+    end
+    if ENGINE_UI.choices[kind] then fields.items=true;fields.value=true;fields.bind=true end
+    if ENGINE_UI.scrollable[kind] then fields.offset=true end
+    if ENGINE_UI.choices[kind] and kind~='tabs' then fields.row_height=true end
+    if kind=='tree' then fields.depths=true end
+    if kind=='dropdown' then fields.max_rows=true end
+    if kind=='image' then fields.sprite=true end
+    if kind=='keybind' then fields.value=true;fields.bind=true end
+    if kind=='toast' then fields.duration=true end
     return fields
 end
 function ENGINE_UI.validate(w)
-    if w.width<=0 or w.height<=0 then return 'width and height must be positive' end
+    local function positive(size) return (type(size)=='table' and size.fraction or size)>0 end
+    if not positive(w.width) or not positive(w.height) then return 'width and height must be positive' end
+    for _,axis in ipairs({'width','height','view_width'}) do
+        local min,max=w['min_'..axis] or 0,w['max_'..axis] or math.huge
+        if min<0 or max<min then return 'Expected 0 <= min_'..axis..' <= max_'..axis end
+    end
+    if (w.inset or 0)<0 or (w.gap or 0)<0 or (w.grow or 0)<0 then return 'inset, gap and grow cannot be negative' end
     if w.scale<1 or w.scale>16 or w.scale%1~=0 then return 'scale must be a whole number from 1 to 16' end
     if w.padding<0 then return 'padding cannot be negative' end
     if w.radius<0 or w.border_width<0 then return 'radius and border_width cannot be negative' end
     if w.font~='readable' and w.font~='pixel' then return 'font must be readable or pixel' end
     if w.kind=='input' and (w.max_length<1 or w.max_length%1~=0) then return 'max_length must be a positive whole number' end
-    if w.kind=='slider' and (w.max<=w.min or w.step<=0) then return 'slider needs max greater than min and step greater than zero' end
-    if w.kind=='slider' and w.max-w.min==math.huge then return 'slider range must have finite length' end
-    if w.kind=='tabs' and not w.items then return 'tabs needs items:["First","Second"]' end
+    if w.kind=='slider' or w.kind=='number' or w.kind=='progress' then
+        if w.max<=w.min or w.step<=0 or w.max-w.min==math.huge then
+            return 'Expected a finite range with max greater than min and step greater than zero'
+        end
+    end
+    if ENGINE_UI.choices[w.kind] and (not w.items or w.kind=='tabs' and #w.items==0) then
+        return 'Expected items:["First","Second"]'
+    end
+    if w.kind=='tree' and w.depths then
+        if #w.depths~=#w.items or #w.depths>0 and w.depths[1]~=0 then return 'depths must match items and start at 0' end
+        for i,depth in ipairs(w.depths) do
+            if depth<0 or depth%1~=0 or i>1 and depth>w.depths[i-1]+1 then return 'Invalid tree depth at item '..i end
+        end
+    end
+    if w.offset and w.offset<0 then return 'offset cannot be negative' end
+    if w.row_height and (w.row_height<1 or w.row_height>8192 or w.row_height%1~=0) then
+        return 'row_height must be a whole number from 1 to 8192 pixels'
+    end
+    if w.max_rows and (w.max_rows<1 or w.max_rows%1~=0) then return 'max_rows must be a positive whole number' end
+    if w.duration and w.duration<=0 then return 'duration must be positive seconds' end
     if w.bind and not w.bind:match('^[A-Za-z_][%w_]*$') then return 'bind must be a simple variable name' end
 end
 function ENGINE_UI.normalize(w,value)
@@ -11578,13 +11849,20 @@ function ENGINE_UI.normalize(w,value)
         local chars=ENGINE_UI.characters(tostring(value or ''):gsub('[\r\n\t]',' '):gsub('[%z\1-\8\11\12\14-\31\127]',''))
         return table.concat(chars,'',1,math.min(#chars,w.max_length))
     elseif w.kind=='checkbox' then return value==true or value==1 or value=='1'
-    elseif w.kind=='tabs' then
+    elseif ENGINE_UI.choices[w.kind] then
+        if #w.items==0 then return 0 end
         value=tonumber(value)
         if not value or value%1~=0 or value<1 or value>#w.items then return nil end
         return value
-    elseif w.kind=='slider' then
+    elseif w.kind=='keybind' then
+        if value=='' then return '' end
+        local key=input_name(value)
+        if ENGINE_UI.is_pick_key(key) then return key end
+    elseif w.kind=='slider' or w.kind=='number' or w.kind=='progress' then
         value=tonumber(value)
         if not value or value~=value or math.abs(value)==math.huge then return nil end
+        if w.kind=='progress' then return math.max(w.min,math.min(w.max,value)) end
+        if w.kind=='number' and value>=w.max then return w.max end
         return math.max(w.min,math.min(w.max,w.min+math.floor((value-w.min)/w.step+.5)*w.step))
     end
 end
@@ -11613,6 +11891,7 @@ function ENGINE_UI.write(ctx,w,value,notify)
     end
     if old~=value then
         w.surface.dirty=true
+        if w.kind=='tabs' then ctx.ui_state.layout_dirty=true end
         if notify then ENGINE_UI.emit(ctx,w,'change',{old_value=w.kind=='checkbox' and (old and 1 or 0) or old}) end
     end
     return true
@@ -11629,6 +11908,7 @@ function ENGINE_UI.sync(ctx)
                     if current~=normalized then
                         if w.kind=='checkbox' then w.checked=normalized else w.value=normalized end
                         w.caret=#ENGINE_UI.characters(tostring(w.value or ''));w.anchor=w.caret;w.surface.dirty=true
+                        if w.kind=='tabs' then state.layout_dirty=true end
                     end
                     local exposed=w.kind=='checkbox' and (normalized and 1 or 0) or normalized
                     if value~=exposed then ENGINE_UI.write(ctx,w,normalized,false) end
@@ -11637,17 +11917,182 @@ function ENGINE_UI.sync(ctx)
         end
     end
 end
+function ENGINE_UI.tree_rows(w)
+    local rows,skip={},nil
+    for index=1,#w.items do
+        local depth=w.depths and w.depths[index] or 0
+        if not skip or depth<=skip then
+            rows[#rows+1]=index
+            skip=w.collapsed[index] and depth or nil
+        end
+    end
+    w.rows=rows
+end
+function ENGINE_UI.row_index(w,row)
+    if w.rows then return w.rows[row] end
+    return row>=1 and row<=#w.items and row or nil
+end
+function ENGINE_UI.row_count(w)
+    return #(w.rows or w.items)
+end
+function ENGINE_UI.length(value,available)
+    return type(value)=='table' and value.fraction*available or value
+end
+function ENGINE_UI.dimensions(w,width,height)
+    return math.max(w.min_width or 0,math.min(w.max_width or math.huge,ENGINE_UI.length(w.width,width))),
+           math.max(w.min_height or 0,math.min(w.max_height or math.huge,ENGINE_UI.length(w.height,height)))
+end
+function ENGINE_UI.flow(rects,p,children)
+    local row=p.layout=='row'
+    local space,cross=p.content_width,p.content_height
+    if not row then space,cross=cross,space end
+    local gap=p.gap or 0
+    local lines,line={}, {used=0,cross=0}
+    for _,w in ipairs(children) do
+        if w.shown then
+            local width,height=ENGINE_UI.dimensions(w,p.content_width,p.content_height)
+            local main,side=width,height
+            if not row then main,side=height,width end
+            if p.wrap and #line>0 and line.used+gap+main>space then
+                lines[#lines+1]=line;line={used=0,cross=0}
+            end
+            line.used=line.used+(#line>0 and gap or 0)+main
+            line.cross=math.max(line.cross,side)
+            line[#line+1]={widget=w,main=main,side=side,
+                cap=(row and w.max_width or not row and w.max_height) or math.huge,
+                side_cap=(row and w.max_height or not row and w.max_width) or math.huge,
+                grow=w.grow or 0}
+        end
+    end
+    if #line>0 then lines[#lines+1]=line end
+    local across=0
+    for _,current in ipairs(lines) do
+        local free=math.max(0,space-current.used)
+        -- Redistribute space left over when a growing child reaches its maximum.
+        while free>1e-6 do
+            local largest=0
+            for _,item in ipairs(current) do
+                if item.main<item.cap then largest=math.max(largest,item.grow) end
+            end
+            if largest==0 then break end
+            local total=0
+            for _,item in ipairs(current) do
+                if item.main<item.cap then total=total+item.grow/largest end
+            end
+            local spent,capped=0,false
+            for _,item in ipairs(current) do
+                if item.grow>0 and item.main<item.cap then
+                    local share=free*(item.grow/largest)/total
+                    local room=item.cap-item.main
+                    local extra=math.min(share,room)
+                    item.main=item.main+extra;spent=spent+extra
+                    if share>room then capped=true end
+                end
+            end
+            free=math.max(0,free-spent)
+            if not capped or spent==0 then break end
+        end
+        local along,spacing=0,gap
+        if p.justify=='center' then along=free/2
+        elseif p.justify=='end' then along=free
+        elseif p.justify=='space_between' and #current>1 then spacing=gap+free/(#current-1) end
+        local line_cross=p.wrap and current.cross or cross
+        for _,item in ipairs(current) do
+            local side=item.side
+            if p.align=='stretch' then side=math.min(item.side_cap,math.max(side,line_cross)) end
+            local room=math.max(0,line_cross-side)
+            local offset=across+(p.align=='center' and room/2 or p.align=='end' and room or 0)
+            if row then rects[item.widget]={along,offset,item.main,side}
+            else rects[item.widget]={offset,along,side,item.main} end
+            along=along+item.main+spacing
+        end
+        across=across+line_cross+gap
+    end
+end
 function ENGINE_UI.layout(ctx)
-    local state=ctx.ui_state;if not state then return end
+    local state=ctx.ui_state;if not state or not state.layout_dirty then return end
+    state.layout_dirty=false
+    local children,flow_rects={},{}
+    local previous_modal=state.modal
+    state.modal=nil
     for _,w in ipairs(state.order) do
         local p=w.parent and state.widgets[w.parent]
-        w.ax,w.ay=w.x+(p and p.ax or 0),w.y+(p and p.ay or 0)
         local tabs=w.tabs and state.widgets[w.tabs]
-        w.shown=w.visible and w.surface.visible and (not p or p.shown) and (not w.tabs or tabs and tabs.shown and tabs.value==w.tab)
+        local width=w.surface.width
+        local shown=w.visible and w.surface.visible and width>=(w.min_view_width or 0) and width<=(w.max_view_width or math.huge)
+            and (not p or p.shown) and (not w.tabs or tabs and tabs.shown and tabs.value==w.tab)
+        if shown~=w.shown then w.surface.dirty=true end
+        w.shown=shown
+        w.modal_root=w.kind=='modal' and w or p and p.modal_root
+        if w.kind=='modal' and shown and (not state.modal or w.modal_order>state.modal.modal_order) then state.modal=w end
+        if w.kind=='scroll' then w.scroll_extent=0 end
+        if p and (p.layout=='row' or p.layout=='column') and w.position~='absolute' then
+            children[p]=children[p] or {}
+            children[p][#children[p]+1]=w
+        end
+    end
+    if state.modal~=previous_modal then
+        for _,surface in ipairs(state.surfaces) do surface.dirty=true end
+    end
+    for _,w in ipairs(state.order) do
+        local p=w.parent and state.widgets[w.parent]
+        local width,height=p and p.content_width or w.surface.width,p and p.content_height or w.surface.height
+        local x,y,aw,ah
+        local flow=flow_rects[w]
+        if flow then x,y,aw,ah=unpack(flow)
+        else
+            aw,ah=ENGINE_UI.dimensions(w,width,height)
+            x,y=ENGINE_UI.length(w.x,width),ENGINE_UI.length(w.y,height)
+            local anchor=w.placement_anchor
+            if anchor then
+                if anchor:find('right',1,true) then x=width-aw-x
+                elseif not anchor:find('left',1,true) then x=(width-aw)/2+x end
+                if anchor:find('bottom',1,true) then y=height-ah-y
+                elseif not anchor:find('top',1,true) then y=(height-ah)/2+y end
+            end
+        end
+        x,y=x+(p and p.content_x or 0),y+(p and p.content_y or 0)
+        if p and p.kind=='scroll' then
+            if w.shown then p.scroll_extent=math.max(p.scroll_extent,y+ah-p.content_y) end
+            y=y-p.offset
+        end
+        if flow or w.placement_anchor or type(w.width)=='table' or type(w.height)=='table' or
+           type(w.x)=='table' or type(w.y)=='table' then
+            local left,top=math.floor(x+.5),math.floor(y+.5)
+            aw,ah=math.floor(x+aw+.5)-left,math.floor(y+ah+.5)-top
+            x,y=left,top
+        end
+        if x~=w.ax or y~=w.ay or aw~=w.aw or ah~=w.ah then w.surface.dirty=true end
+        w.ax,w.ay,w.aw,w.ah=x,y,aw,ah
         w.active=w.enabled and (not p or p.active)
-        w.clip={math.max(w.ax,p and p.clip[1] or 0),math.max(w.ay,p and p.clip[2] or 0),
-            math.min(w.ax+w.width,p and p.clip[3] or w.surface.width),
-            math.min(w.ay+w.height,p and p.clip[4] or w.surface.height)}
+        local inset=w.inset or 0
+        w.content_x,w.content_y=x+inset,y+inset
+        w.content_width,w.content_height=math.max(0,aw-2*inset),math.max(0,ah-2*inset)
+        local c=p and p.child_clip
+        w.clip={math.max(x,c and c[1] or 0),math.max(y,c and c[2] or 0),
+            math.min(x+aw,c and c[3] or w.surface.width),math.min(y+ah,c and c[4] or w.surface.height)}
+        if ENGINE_UI.containers[w.kind] then
+            if w.kind=='scroll' then w.content_width=math.max(0,w.content_width-12) end
+            w.child_clip={math.max(w.clip[1],w.content_x),math.max(w.clip[2],w.content_y),
+                math.min(w.clip[3],w.content_x+w.content_width),math.min(w.clip[4],w.content_y+w.content_height)}
+            if children[w] then ENGINE_UI.flow(flow_rects,w,children[w]) end
+        end
+    end
+    for _,w in ipairs(state.order) do
+        if w.shown and w.kind=='scroll' then
+            local limit=math.max(0,w.scroll_extent-w.content_height)
+            if w.offset>limit then w.offset=limit;state.layout_dirty=true end
+        elseif w.shown and ENGINE_UI.scrollable[w.kind] then
+            ENGINE_UI.scroll_to(ctx,w,w.offset,false)
+        end
+    end
+    if state.layout_dirty then return ENGINE_UI.layout(ctx) end
+    if state.popup and (not state.popup.shown or not state.popup.active or state.modal and state.popup.modal_root~=state.modal) then
+        ENGINE_UI.popup(ctx,nil)
+    end
+    if state.modal then
+        if state.focus and state.focus.modal_root~=state.modal then ENGINE_UI.focus(ctx,nil) end
+        if state.capture and state.capture.modal_root~=state.modal then state.capture=nil end
     end
     if state.focus and (not state.focus.shown or not state.focus.active) then ENGINE_UI.focus(ctx,nil) end
     if state.capture and (not state.capture.shown or not state.capture.active) then state.capture=nil end
@@ -11657,8 +12102,66 @@ end
 function ENGINE_UI.focus(ctx,w)
     local state=ctx.ui_state;if not state or state.focus==w then return end
     local old=state.focus;state.focus=w
-    if old then old.surface.dirty=true;ENGINE_UI.emit(ctx,old,'blur') end
+    if old then
+        if state.popup==old then ENGINE_UI.popup(ctx,nil) end
+        if state.key_capture==old then state.key_capture=nil end
+        old.draft=nil;old.surface.dirty=true;ENGINE_UI.emit(ctx,old,'blur')
+    end
     if w then w.surface.dirty=true;ENGINE_UI.emit(ctx,w,'focus') end
+end
+function ENGINE_UI.popup(ctx,w)
+    local state=ctx.ui_state
+    local old=state.popup
+    if old==w then return end
+    state.popup=w
+    if old then old.surface.dirty=true;ENGINE_UI.emit(ctx,old,'close') end
+    if w then
+        w.surface.dirty=true;ENGINE_UI.emit(ctx,w,'open')
+    end
+end
+function ENGINE_UI.choice_box(w)
+    if w.kind~='dropdown' then return w.ax,w.ay,w.aw,w.ah end
+    local below=w.surface.height-w.ay-w.ah
+    local height=math.min(ENGINE_UI.row_count(w),w.max_rows)*w.row_height
+    local down=height<=below or below>=w.ay
+    height=math.max(0,math.min(height,down and below or w.ay))
+    return w.ax,down and w.ay+w.ah or w.ay-height,w.aw,height
+end
+function ENGINE_UI.scroll_metrics(w)
+    if w.kind=='scroll' then return w.content_y,w.content_height,w.scroll_extent,w.ax+w.aw-(w.inset or 0)-12 end
+    local x,y,width,height=ENGINE_UI.choice_box(w)
+    return y,height,ENGINE_UI.row_count(w)*w.row_height,x+width-12
+end
+function ENGINE_UI.scroll_to(ctx,w,offset,notify)
+    local _,height,total=ENGINE_UI.scroll_metrics(w)
+    local old=w.offset
+    w.offset=math.max(0,math.min(math.max(0,total-height),offset))
+    if w.offset==old then return false end
+    w.surface.dirty=true
+    if w.kind=='scroll' then ctx.ui_state.layout_dirty=true;ENGINE_UI.layout(ctx) end
+    if notify then ENGINE_UI.emit(ctx,w,'scroll',{offset=w.offset,old_offset=old}) end
+    return true
+end
+function ENGINE_UI.scrollbar(w)
+    local y,height,total,x=ENGINE_UI.scroll_metrics(w)
+    if height<=0 or total<=height then return end
+    local thumb=math.min(height,math.max(10,height*height/total))
+    local top=y+(height-thumb)*math.min(w.offset,total-height)/(total-height)
+    return x,y,height,top,thumb,total-height
+end
+function ENGINE_UI.pick_key(ctx,w)
+    local state=ctx.ui_state
+    if not ENGINE_UI.pick_keys then
+        local keys={}
+        for key in pairs(input_codes) do if ENGINE_UI.is_pick_key(key) then keys[#keys+1]=key end end
+        table.sort(keys)
+        ENGINE_UI.pick_keys=keys
+    end
+    state.key_capture=w
+    -- Seed a fresh snapshot on the next tick. Keys already down must be
+    -- released and pressed again before they can become the binding.
+    state.key_seed=true
+    w.surface.dirty=true
 end
 function ENGINE_UI.apply_style(w,ui)
     local p=w.parent and ui.widgets[w.parent]
@@ -11693,13 +12196,28 @@ function ENGINE_UI.scene_sample(ctx,sample)
     if interaction_current and interaction_current.input_focused then return sample end
     local surface=ctx.ui_state.surfaces[1]
     local width,height=surface.scene_width,surface.scene_height
+    -- OBS can resize the scene and its item transforms while the UI keeps
+    -- its original logical buffer. Map the preview to today's scene size
+    -- before inverting the item's transform into that buffer.
+    if surface.scene_source and obslua.obs_source_get_base_width and obslua.obs_source_get_base_height then
+        local scene_width=obslua.obs_source_get_base_width(surface.scene_source)
+        local scene_height=obslua.obs_source_get_base_height(surface.scene_source)
+        if scene_width>0 and scene_height>0 then width,height=scene_width,scene_height end
+    end
     if ctx.input_preview and ctx.input_preview.width==width and ctx.input_preview.height==height then return sample end
     -- Gameplay may sample a different viewport. UI hit testing always starts
     -- in the current scene, with independent button history and no text read.
     local state=ctx.ui_state;local history=state.pointer_history or {};state.pointer_history=history
-    history.input_window=ctx.input_window;history.input_preview={width=width,height=height};history.input_viewport=nil
+    local preview=history.input_preview or {};history.input_preview=preview
+    preview.width,preview.height=width,height
+    history.input_window=ctx.input_window;history.input_viewport=nil
     history.input_event_owner=ctx
-    local result,why=input_poll(history,ENGINE_UI.keys,true)
+    local keys=ENGINE_UI.keys
+    if state.key_capture then
+        keys={unpack(keys)}
+        for _,key in ipairs(ENGINE_UI.pick_keys) do keys[#keys+1]=key end
+    end
+    local result,why=input_poll(history,keys,true)
     if not result then return nil,'Input Error: '..tostring(why) end
     result._ui_window=history.input_active_window
     return result
@@ -11794,9 +12312,58 @@ function ENGINE_UI.pointer_targets(ctx,sample)
     end
     return targets
 end
-function ENGINE_UI.poll(ctx,sample,text,dt)
+function ENGINE_UI.set_visible(ctx,w,visible)
+    if w.kind=='toast' and visible then w.remaining=w.duration end
+    local state=ctx.ui_state
+    local was_top=state.modal==w
+    if w.kind=='modal' and visible and not was_top then
+        w.restore_focus=state.focus
+        state.modal_serial=(state.modal_serial or 0)+1;w.modal_order=state.modal_serial
+        state.layout_dirty=true
+        if w.visible then ENGINE_UI.layout(ctx) end
+    end
+    if w.visible==visible then return end
+    w.visible=visible;w.surface.dirty=true;state.layout_dirty=true
+    ENGINE_UI.layout(ctx)
+    if w.kind=='modal' and not visible then
+        local previous=w.restore_focus;w.restore_focus=nil
+        if was_top and previous and state.widgets[previous.name]==previous and previous.shown and previous.active and
+           (not state.modal or previous.modal_root==state.modal) then ENGINE_UI.focus(ctx,previous) end
+    end
+    if w.kind=='modal' or w.kind=='toast' then ENGINE_UI.emit(ctx,w,visible and 'open' or 'close') end
+end
+function ENGINE_UI.tree_branch(ctx,w,index,collapsed)
+    if not w.depths or not w.depths[index+1] or w.depths[index+1]<=w.depths[index] or
+       (w.collapsed[index]==true)==collapsed then return end
+    w.collapsed[index]=collapsed or nil
+    ENGINE_UI.tree_rows(w)
+    ENGINE_UI.scroll_to(ctx,w,w.offset,false)
+    w.surface.dirty=true
+    ENGINE_UI.emit(ctx,w,collapsed and 'collapse' or 'expand',{index=index,text=w.items[index]})
+end
+function ENGINE_UI.choice_click(ctx,w,x,y)
+    local _,top=ENGINE_UI.choice_box(w)
+    local index=ENGINE_UI.row_index(w,math.floor((y-top+w.offset)/w.row_height)+1)
+    if not index then return end
+    if w.kind=='tree' and w.depths and w.depths[index+1] and w.depths[index+1]>w.depths[index] and
+       x<w.ax+w.padding+(w.depths[index]+1)*14 then
+        ENGINE_UI.tree_branch(ctx,w,index,not w.collapsed[index])
+        return
+    end
+    ENGINE_UI.write(ctx,w,index,true)
+end
+function ENGINE_UI.poll(ctx,sample,text,dt,wheel)
     local state=ctx.ui_state;if not state then return end
     state.dt=dt
+    for _,w in pairs(state.toasts) do
+        if w.visible then
+            w.remaining=(w.remaining or w.duration)-dt
+            if w.remaining<=0 then
+                ENGINE_UI.set_visible(ctx,w,false)
+                ENGINE_UI.emit(ctx,w,'expired')
+            end
+        end
+    end
     ENGINE_UI.sync(ctx);ENGINE_UI.layout(ctx)
     local window=sample._ui_window or ctx.input_event_poll and ctx.input_event_poll.input_active_window or interaction_current
     if state.window and state.window~=window then ENGINE_UI.focus(ctx,nil);state.capture=nil end
@@ -11818,12 +12385,22 @@ function ENGINE_UI.poll(ctx,sample,text,dt)
             if ctx.input_handlers and ctx.input_handlers['ui:'..w.name..':'..kind] then return true end
         end
     end
+    local hit_popup
     for target_index=#targets,1,-1 do
         local target=targets[target_index]
+        local popup=state.popup
+        if not hit and popup and popup.surface==target.surface and sample.focused and target.inside then
+            local x,y,width,height=ENGINE_UI.choice_box(popup)
+            if target.x>=x and target.x<x+width and target.y>=y and target.y<y+height then
+                hit,hit_target,hit_popup=popup,target,true
+            end
+        end
         for i=#state.order,1,-1 do
             local w=state.order[i]
             local c=w.clip
-            if w.surface==target.surface and not hit and sample.focused and target.inside and w.shown and (w.kind~='label' or pointer_listener(w)) and
+            if w.surface==target.surface and not hit and sample.focused and target.inside and w.shown and
+               (not state.modal or w.modal_root==state.modal) and
+               (not ENGINE_UI.passive[w.kind] or ENGINE_UI.containers[w.kind] or w.tooltip and w.tooltip~='' or pointer_listener(w)) and
                target.x>=c[1] and target.x<c[3] and target.y>=c[2] and target.y<c[4] then
                 hit,hit_target=w,target;w.mx,w.my=target.x,target.y
             end
@@ -11831,11 +12408,40 @@ function ENGINE_UI.poll(ctx,sample,text,dt)
     end
     if state.capture and capture_target then state.capture.mx,state.capture.my=capture_target.x,capture_target.y end
     if state.hover~=hit then
-        if state.hover then state.hover.surface.dirty=true;ENGINE_UI.emit(ctx,state.hover,'mouse_leave') end
-        state.hover=hit;if hit then hit.surface.dirty=true;ENGINE_UI.emit(ctx,hit,'mouse_enter') end
+        if state.hover then
+            state.hover.hover_row=nil;state.hover.surface.dirty=true
+            ENGINE_UI.emit(ctx,state.hover,'mouse_leave')
+        end
+        state.hover=hit;state.hover_time=0;state.tooltip=nil
+        if hit then hit.surface.dirty=true;ENGINE_UI.emit(ctx,hit,'mouse_enter') end
+    end
+    if hit and hit.tooltip and hit.tooltip~='' and not state.capture and not state.popup then
+        state.hover_time=(state.hover_time or 0)+dt
+        if state.hover_time>=.45 and state.tooltip~=hit then state.tooltip=hit;hit.surface.dirty=true end
+    elseif state.tooltip then
+        state.tooltip.surface.dirty=true;state.tooltip=nil;state.hover_time=0
+    end
+    if wheel and wheel~=0 then
+        local scroll=hit
+        while scroll do
+            if scroll.active and ENGINE_UI.scrollable[scroll.kind] and (scroll.kind~='dropdown' or hit_popup) and
+               ENGINE_UI.scroll_to(ctx,scroll,scroll.offset-wheel*(scroll.row_height or 36),true) then break end
+            scroll=scroll.parent and state.widgets[scroll.parent]
+        end
+    end
+    if hit and ENGINE_UI.choices[hit.kind] and hit.kind~='tabs' then
+        local index
+        if hit.kind~='dropdown' or hit_popup then
+            local _,top=ENGINE_UI.choice_box(hit)
+            local gutter=ENGINE_UI.scrollbar(hit)
+            if not gutter or hit.mx<gutter then
+                index=ENGINE_UI.row_index(hit,math.floor((hit.my-top+hit.offset)/hit.row_height)+1)
+            end
+        end
+        if index~=hit.hover_row then hit.hover_row=index;hit.surface.dirty=true end
     end
     for _,w in ipairs(state.order) do if w.kind=='tabs' then
-        local index=hit==w and math.max(1,math.min(#w.items,math.floor((w.mx-w.ax)/w.width*#w.items)+1)) or nil
+        local index=hit==w and math.max(1,math.min(#w.items,math.floor((w.mx-w.ax)/w.aw*#w.items)+1)) or nil
         if w.hover_tab~=index then w.hover_tab=index;w.surface.dirty=true end
     end end
     local function pressed(key) return sample.keys[key] and sample.keys[key].pressed end
@@ -11857,12 +12463,24 @@ function ENGINE_UI.poll(ctx,sample,text,dt)
     local function editing_key(key) return pressed(key) or repeats[key] end
     local mouse=sample.keys.MOUSE_LEFT or {}
     if mouse.pressed then
+        if state.popup and hit~=state.popup then
+            ENGINE_UI.popup(ctx,nil)
+            hit=nil
+        end
         local target=hit and hit.active and hit or nil
-        ENGINE_UI.focus(ctx,target and target.kind~='panel' and target.kind~='label' and target or nil);state.capture=target
+        ENGINE_UI.focus(ctx,target and not ENGINE_UI.passive[target.kind] and target or nil);state.capture=target
         state.capture_path=target and hit_target.path or nil
+        state.capture_popup=hit_popup
+        state.scroll_drag=nil
         if target then
             ENGINE_UI.emit(ctx,target,'press')
             target.surface.dirty=true
+            if ENGINE_UI.scrollable[target.kind] and (target.kind~='dropdown' or hit_popup) then
+                local x,top,height,thumb_y,thumb=ENGINE_UI.scrollbar(target)
+                if x and target.mx>=x and target.my>=top and target.my<top+height then
+                    state.scroll_drag=target.my>=thumb_y and target.my<thumb_y+thumb and target.my-thumb_y or thumb/2
+                end
+            end
             if target.kind=='input' then
                 local advance=(target.font=='readable' and 6 or 4)*target.scale
                 target.caret=math.max(0,math.min(#ENGINE_UI.characters(target.value),
@@ -11872,8 +12490,14 @@ function ENGINE_UI.poll(ctx,sample,text,dt)
         end
     end
     local capture=state.capture
+    if capture and state.scroll_drag and (mouse.down or mouse.pressed or mouse.released) then
+        local x,top,height,_,thumb,range=ENGINE_UI.scrollbar(capture)
+        if x then
+            ENGINE_UI.scroll_to(ctx,capture,(capture.my-top-state.scroll_drag)*range/math.max(1,height-thumb),true)
+        end
+    end
     if capture and capture.kind=='slider' and capture.shown and capture.active and sample.focused and (mouse.down or mouse.pressed or mouse.released) then
-        local ratio=math.max(0,math.min(1,(capture.mx-capture.ax-capture.padding)/math.max(1,capture.width-2*capture.padding)))
+        local ratio=math.max(0,math.min(1,(capture.mx-capture.ax-capture.padding)/math.max(1,capture.aw-2*capture.padding)))
         ENGINE_UI.write(ctx,capture,capture.min+ratio*(capture.max-capture.min),true)
     end
     if capture and capture.kind=='input' and capture.shown and capture.active and sample.focused and mouse.down then
@@ -11882,11 +12506,29 @@ function ENGINE_UI.poll(ctx,sample,text,dt)
             math.floor((capture.mx-capture.ax-capture.padding)/advance+.5)+(capture.scroll or 0)))
         if caret~=capture.caret then capture.caret=caret;capture.surface.dirty=true end
     end
-    local function activate(w)
+    local function activate(w,pointer)
         if w.kind=='checkbox' then ENGINE_UI.write(ctx,w,not w.checked,true) end
         if w.kind=='tabs' then
-            ENGINE_UI.write(ctx,w,math.max(1,math.min(#w.items,math.floor((w.mx-w.ax)/w.width*#w.items)+1)),true)
-            ENGINE_UI.layout(ctx)
+            if w.mx and w.aw>0 then
+                ENGINE_UI.write(ctx,w,math.max(1,math.min(#w.items,math.floor((w.mx-w.ax)/w.aw*#w.items)+1)),true)
+                ENGINE_UI.layout(ctx)
+            end
+        end
+        if w.kind=='dropdown' then
+            if pointer and hit_popup then
+                ENGINE_UI.choice_click(ctx,w,w.mx,w.my);ENGINE_UI.popup(ctx,nil)
+            else
+                ENGINE_UI.popup(ctx,state.popup~=w and w or nil)
+                ENGINE_UI.scroll_to(ctx,w,w.offset,false)
+            end
+        elseif pointer and (w.kind=='list' or w.kind=='tree' or w.kind=='radio') then
+            ENGINE_UI.choice_click(ctx,w,w.mx,w.my)
+        elseif w.kind=='keybind' then
+            ENGINE_UI.pick_key(ctx,w)
+        elseif w.kind=='number' and pointer then
+            local button=math.min(w.ah,w.aw/3)
+            local delta=w.mx<w.ax+button and -1 or w.mx>=w.ax+w.aw-button and 1 or 0
+            if delta~=0 then w.draft=nil;ENGINE_UI.write(ctx,w,w.value+delta*w.step,true) end
         end
         ENGINE_UI.emit(ctx,w,'click')
     end
@@ -11895,17 +12537,45 @@ function ENGINE_UI.poll(ctx,sample,text,dt)
             capture.surface.dirty=true
             if capture.active and capture.shown and sample.focused then
                 ENGINE_UI.emit(ctx,capture,'release')
-                if capture==hit and hit_target.path==state.capture_path then activate(capture) end
+                if capture==hit and hit_target.path==state.capture_path and not state.scroll_drag and
+                   (capture.kind~='dropdown' or state.capture_popup==hit_popup) then activate(capture,true) end
             end
         end
         state.capture=nil
         state.capture_path=nil
+        state.scroll_drag=nil
+    end
+    if state.key_capture and sample.focused then
+        local picker=state.key_capture
+        if pressed('ESCAPE') then state.key_capture=nil;picker.surface.dirty=true
+        elseif sample.keys.F12 then
+            if state.key_seed then
+                state.key_seed=false
+            else
+                for _,key in ipairs(ENGINE_UI.pick_keys) do
+                    if pressed(key) then
+                        state.key_capture=nil;picker.surface.dirty=true
+                        ENGINE_UI.write(ctx,picker,key,true)
+                        ENGINE_UI.emit(ctx,picker,'submit',{key=key})
+                        break
+                    end
+                end
+            end
+        end
+        state.keyboard_captured=true
+        state.pointer_captured=hit~=nil or state.capture~=nil or state.modal~=nil
+        return
+    end
+    if pressed('ESCAPE') and sample.focused then
+        if state.popup then ENGINE_UI.popup(ctx,nil)
+        elseif state.modal then ENGINE_UI.set_visible(ctx,state.modal,false) end
     end
     local shift=down('SHIFT');local ctrl=down('CTRL')
     if pressed('TAB') and sample.focused then
         local controls={};local at
         for _,w in ipairs(state.order) do
-            if w.shown and w.active and visible[w.surface] and w.kind~='label' and w.kind~='panel' then
+            if w.shown and w.active and visible[w.surface] and not ENGINE_UI.passive[w.kind] and
+               (not state.modal or w.modal_root==state.modal) and w.clip[3]>w.clip[1] and w.clip[4]>w.clip[2] then
                 controls[#controls+1]=w;if state.focus==w then at=#controls end
             end
         end
@@ -11913,16 +12583,58 @@ function ENGINE_UI.poll(ctx,sample,text,dt)
         text='' -- Tab is navigation, not text insertion.
     end
     focus=state.focus
-    state.pointer_captured=hit~=nil or state.capture~=nil
-    state.keyboard_captured=focus~=nil
+    state.pointer_captured=hit~=nil or state.capture~=nil or state.modal~=nil
+    state.keyboard_captured=focus~=nil or state.modal~=nil
     if not focus or not focus.active or not focus.shown or not sample.focused then return end
-    if focus.kind=='button' or focus.kind=='checkbox' then
+    if focus.kind=='button' or focus.kind=='checkbox' or focus.kind=='keybind' then
         if pressed('ENTER') or pressed('SPACE') then activate(focus) end
     elseif focus.kind=='tabs' then
         if editing_key('LEFT') then ENGINE_UI.write(ctx,focus,math.max(1,focus.value-1),true) end
         if editing_key('RIGHT') then ENGINE_UI.write(ctx,focus,math.min(#focus.items,focus.value+1),true) end
         if pressed('HOME') then ENGINE_UI.write(ctx,focus,1,true) end
         if pressed('END') then ENGINE_UI.write(ctx,focus,#focus.items,true) end
+    elseif ENGINE_UI.choices[focus.kind] then
+        if focus.kind=='tree' and focus.value>0 then
+            if pressed('LEFT') then ENGINE_UI.tree_branch(ctx,focus,focus.value,true) end
+            if pressed('RIGHT') then ENGINE_UI.tree_branch(ctx,focus,focus.value,false) end
+        end
+        local row=focus.value
+        if focus.rows then
+            row=1
+            for i,index in ipairs(focus.rows) do if index==focus.value then row=i;break end end
+        end
+        local direction=(pressed('UP') and -1 or 0)+(pressed('DOWN') and 1 or 0)
+        if ENGINE_UI.row_count(focus)>0 and (direction~=0 or pressed('HOME') or pressed('END')) then
+            row=pressed('HOME') and 1 or pressed('END') and ENGINE_UI.row_count(focus) or
+                math.max(1,math.min(ENGINE_UI.row_count(focus),row+direction))
+            ENGINE_UI.write(ctx,focus,ENGINE_UI.row_index(focus,row),true)
+            local _,height=ENGINE_UI.scroll_metrics(focus)
+            local top=(row-1)*focus.row_height
+            local offset=math.max(top+focus.row_height-height,math.min(top,focus.offset))
+            ENGINE_UI.scroll_to(ctx,focus,offset,false)
+        end
+        if focus.kind=='dropdown' and (pressed('ENTER') or pressed('SPACE')) then activate(focus) end
+    elseif focus.kind=='scroll' then
+        local direction=(pressed('UP') and -1 or 0)+(pressed('DOWN') and 1 or 0)
+        if direction~=0 then ENGINE_UI.scroll_to(ctx,focus,focus.offset+direction*36,true) end
+        if pressed('HOME') then ENGINE_UI.scroll_to(ctx,focus,0,true) end
+        if pressed('END') then ENGINE_UI.scroll_to(ctx,focus,focus.scroll_extent,true) end
+    elseif focus.kind=='number' then
+        local direction=(editing_key('LEFT') or pressed('DOWN')) and -1 or (editing_key('RIGHT') or pressed('UP')) and 1 or 0
+        if direction~=0 then focus.draft=nil;ENGINE_UI.write(ctx,focus,focus.value+direction*focus.step,true);focus.surface.dirty=true end
+        if not ctrl then
+            local draft=focus.draft
+            for char in (text or ''):gmatch('[%d%.%+%-]') do
+                if #(draft or '')<32 then draft=(draft or '')..char end
+            end
+            if draft and editing_key('BACKSPACE') then draft=draft:sub(1,-2) end
+            if focus.draft~=draft then focus.draft=draft;focus.surface.dirty=true end
+        end
+        if pressed('ESCAPE') then focus.draft=nil;focus.surface.dirty=true end
+        if pressed('ENTER') then
+            if focus.draft and tonumber(focus.draft) then ENGINE_UI.write(ctx,focus,focus.draft,true) end
+            focus.draft=nil;focus.surface.dirty=true;ENGINE_UI.emit(ctx,focus,'submit')
+        end
     elseif focus.kind=='slider' then
         if editing_key('LEFT') then ENGINE_UI.write(ctx,focus,focus.value-focus.step,true) end
         if editing_key('RIGHT') then ENGINE_UI.write(ctx,focus,focus.value+focus.step,true) end
@@ -12004,34 +12716,113 @@ function ENGINE_UI.render(ctx)
                     rect(w,x+inset,y+row,width-2*inset,1,color)
                 end
             end
-            for _,w in ipairs(state.order) do
-                if w.surface==surface and w.shown then
+            local function scrollbar(w,clip)
+                local x,y,height,top,thumb=ENGINE_UI.scrollbar(w)
+                if x then
+                    rect(clip,x+2,y,8,height,ENGINE_UI.color(w.disabled_color))
+                    rect(clip,x+2,top,8,thumb,ENGINE_UI.color(w.accent))
+                end
+            end
+            local function choices(w,clip)
+                local x,y,width,height=ENGINE_UI.choice_box(w)
+                local first=math.max(1,math.floor(w.offset/w.row_height)+1)
+                local last=math.min(ENGINE_UI.row_count(w),math.ceil((w.offset+height)/w.row_height))
+                local gutter=ENGINE_UI.scrollbar(w) and 12 or 0
+                for row=first,last do
+                    local index=ENGINE_UI.row_index(w,row)
+                    local top=y+(row-1)*w.row_height-w.offset
+                    local fg=ENGINE_UI.color(w.active and w.text_color or w.disabled_color)
+                    local bg=ENGINE_UI.color(w.value==index and w.pressed_color or
+                        w.active and w.hover_row==index and w.hover_color or w.background)
+                    rect(clip,x,top,width-gutter,w.row_height,bg)
+                    local tx=x+w.padding
+                    local ty=top+math.max(0,(w.row_height-(w.font=='readable' and 7 or 5)*w.scale)/2)
+                    if w.kind=='tree' then
+                        local depth=w.depths and w.depths[index] or 0
+                        tx=tx+depth*14
+                        if w.depths and w.depths[index+1] and w.depths[index+1]>depth then
+                            text(clip,w.collapsed[index] and '+' or '-',tx,ty,fg)
+                        end
+                        tx=tx+14
+                    elseif w.kind=='radio' then
+                        rounded(clip,tx,top+(w.row_height-14)/2,14,14,7,fg)
+                        rounded(clip,tx+3,top+(w.row_height-8)/2,8,8,4,
+                            w.value==index and ENGINE_UI.color(w.accent) or bg)
+                        tx=tx+21
+                    end
+                    text(clip,w.items[index],tx,ty,fg,x+width-gutter-4)
+                end
+                scrollbar(w,clip)
+            end
+            local function draw_widget(w)
+                if w.surface==surface and w.shown and w.clip[3]>w.clip[1] and w.clip[4]>w.clip[2] then
                     local function color(key) return ENGINE_UI.color(w[key]) end
                     local fg=w.active and color('text_color') or color('disabled_color')
                     local bg=w.kind~='panel' and state.capture==w and color('pressed_color') or
                         w.kind~='panel' and state.hover==w and w.active and color('hover_color') or color('background')
                     local x,y=w.ax,w.ay;local line=(w.font=='readable' and 7 or 5)*w.scale
-                    if w.kind~='label' then
+                    if w.kind~='label' and w.kind~='image' and w.kind~='separator' then
                         local border=state.focus==w and math.max(2,w.border_width) or w.border_width
-                        rounded(w,x,y,w.width,w.height,w.radius,state.focus==w and color('accent') or color('border_color'))
-                        rounded(w,x+border,y+border,w.width-2*border,w.height-2*border,math.max(0,w.radius-border),bg)
+                        rounded(w,x,y,w.aw,w.ah,w.radius,state.focus==w and color('accent') or color('border_color'))
+                        rounded(w,x+border,y+border,w.aw-2*border,w.ah-2*border,math.max(0,w.radius-border),bg)
                     end
-                    local tx,ty=x+w.padding,y+math.max(0,(w.height-line)/2)
-                    if w.kind=='tabs' then
-                        local width=w.width/#w.items
+                    local tx,ty=x+w.padding,y+math.max(0,(w.ah-line)/2)
+                    if w.kind=='list' or w.kind=='tree' or w.kind=='radio' then
+                        choices(w,w)
+                    elseif w.kind=='dropdown' then
+                        text(w,w.items[w.value] or '',tx,ty,fg,x+w.aw-w.padding-16)
+                        text(w,state.popup==w and '-' or '+',x+w.aw-w.padding-10,ty,fg)
+                    elseif w.kind=='number' then
+                        local button=math.min(w.ah,w.aw/3)
+                        rect(w,x+button,y,1,w.ah,color('border_color'))
+                        rect(w,x+w.aw-button,y,1,w.ah,color('border_color'))
+                        text(w,'-',x+button/2-3*w.scale,ty,fg)
+                        text(w,'+',x+w.aw-button/2-3*w.scale,ty,fg)
+                        text(w,w.draft or tostring(w.value),x+button+4,ty,fg,x+w.aw-button-4)
+                    elseif w.kind=='progress' then
+                        local ratio=(w.value-w.min)/(w.max-w.min)
+                        local inset=math.min(w.padding,w.ah/3,w.aw/3)
+                        rect(w,x+inset,y+inset,(w.aw-2*inset)*ratio,w.ah-2*inset,color('accent'))
+                    elseif w.kind=='image' then
+                        local sprite=ctx.sprite_states and ctx.sprite_states[w.sprite]
+                        if sprite then
+                            local scale=math.min(w.aw/sprite.w,w.ah/sprite.h)
+                            local sx,sy=x+(w.aw-sprite.w*scale)/2,y+(w.ah-sprite.h*scale)/2
+                            for row=0,sprite.h-1 do
+                                local top,bottom=math.floor(sy+row*scale),math.floor(sy+(row+1)*scale)
+                                if bottom>top then
+                                    for col=0,sprite.w-1 do
+                                        local pixel=sprite.palette[sprite.pixels[row*sprite.w+col+1]+1]
+                                        if pixel then
+                                            local left=math.floor(sx+col*scale)
+                                            rect(w,left,top,math.floor(sx+(col+1)*scale)-left,bottom-top,pixel)
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    elseif w.kind=='separator' then
+                        rect(w,x,y+math.floor(w.ah/2),w.aw,1,color('border_color'))
+                    elseif w.kind=='toast' then
+                        text(w,w.text,tx,ty,fg,x+w.aw-w.padding)
+                    elseif w.kind=='keybind' then
+                        local caption=state.key_capture==w and 'PRESS A KEY' or w.value~='' and w.value or 'UNBOUND'
+                        text(w,w.text~='' and w.text..': '..caption or caption,tx,ty,fg,x+w.aw-w.padding)
+                    elseif w.kind=='tabs' then
+                        local width=w.aw/#w.items
                         for i,caption in ipairs(w.items) do
                             local left=x+(i-1)*width
                             local selected=w.value==i
-                            rounded(w,left+2,y+2,width-4,w.height-4,math.max(0,w.radius-2),
+                            rounded(w,left+2,y+2,width-4,w.ah-4,math.max(0,w.radius-2),
                                 selected and color('pressed_color') or w.hover_tab==i and w.active and color('hover_color') or color('background'))
-                            if selected then rect(w,left+8,y+w.height-4,width-16,2,color('accent')) end
+                            if selected then rect(w,left+8,y+w.ah-4,width-16,2,color('accent')) end
                             local length=#ENGINE_UI.characters(caption)*(w.font=='readable' and 6 or 4)*w.scale
                             text(w,caption,math.max(left+6,left+(width-length)/2),ty,fg,left+width-6)
                         end
                     elseif w.kind=='input' then
                         local chars=ENGINE_UI.characters(w.value)
                         local advance=(w.font=='readable' and 6 or 4)*w.scale
-                        local slots=math.max(1,math.floor((w.width-2*w.padding)/advance))
+                        local slots=math.max(1,math.floor((w.aw-2*w.padding)/advance))
                         w.scroll=math.max(0,math.min(w.scroll or 0,math.max(0,#chars-slots)))
                         if state.focus==w then
                             if w.caret<w.scroll then w.scroll=w.caret end
@@ -12042,24 +12833,56 @@ function ENGINE_UI.render(ctx)
                         end
                         local value=w.password and string.rep('*',#chars-w.scroll) or table.concat(chars,'',w.scroll+1)
                         if #chars==0 and state.focus~=w then value=w.placeholder;fg=color('disabled_color') end
-                        text(w,value,tx,ty,fg,x+w.width-w.padding)
+                        text(w,value,tx,ty,fg,x+w.aw-w.padding)
                         if state.focus==w then rect(w,tx+(w.caret-w.scroll)*advance,ty,1,line,color('accent')) end
                     elseif w.kind=='checkbox' then
-                        local size=math.min(22,w.height-8)
-                        rect(w,tx,y+(w.height-size)/2,size,size,color('disabled_color'))
-                        rect(w,tx+3,y+(w.height-size)/2+3,size-6,size-6,w.checked and color('accent') or bg)
-                        text(w,w.text,tx+size+10,ty,fg,x+w.width-w.padding)
+                        local size=math.max(0,math.min(22,w.ah-8))
+                        rect(w,tx,y+(w.ah-size)/2,size,size,color('disabled_color'))
+                        rect(w,tx+3,y+(w.ah-size)/2+3,size-6,size-6,w.checked and color('accent') or bg)
+                        text(w,w.text,tx+size+10,ty,fg,x+w.aw-w.padding)
                     elseif w.kind=='slider' then
-                        local width=math.max(1,w.width-2*w.padding)
+                        local width=math.max(1,w.aw-2*w.padding)
                         local ratio=(w.value-w.min)/(w.max-w.min)
-                        rect(w,tx,y+w.height/2-2,width,4,color('disabled_color'))
-                        rect(w,tx,y+w.height/2-2,width*ratio,4,color('accent'))
-                        rect(w,tx+width*ratio-5,y+w.height/2-9,10,18,fg)
+                        rect(w,tx,y+w.ah/2-2,width,4,color('disabled_color'))
+                        rect(w,tx,y+w.ah/2-2,width*ratio,4,color('accent'))
+                        rect(w,tx+width*ratio-5,y+w.ah/2-9,10,18,fg)
                     elseif w.kind=='button' then
                         local length=#ENGINE_UI.characters(w.text)*(w.font=='readable' and 6 or 4)*w.scale
-                        text(w,w.text,math.max(tx,x+(w.width-length)/2),ty,fg,x+w.width-w.padding)
-                    elseif w.kind=='label' then text(w,w.text,tx,ty,fg,x+w.width-w.padding) end
+                        text(w,w.text,math.max(tx,x+(w.aw-length)/2),ty,fg,x+w.aw-w.padding)
+                    elseif w.kind=='label' then text(w,w.text,tx,ty,fg,x+w.aw-w.padding)
+                    elseif w.kind=='scroll' then scrollbar(w,w) end
                 end
+            end
+            local function layer(modal)
+                for _,w in ipairs(state.order) do
+                    if w.modal_root==modal and w.kind~='toast' then draw_widget(w) end
+                end
+            end
+            layer(nil)
+            if state.modal and state.modal.surface==surface then
+                for i=0,frame.w*frame.h-1 do
+                    local pixel=frame.words[i]
+                    frame.words[i]=pixel==0 and 0xB0181010 or bit.band(bit.rshift(pixel,1),0x007F7F7F)+0xFF000000
+                end
+                layer(state.modal)
+            end
+            local popup=state.popup
+            if popup and popup.surface==surface then
+                local x,y,width,height=ENGINE_UI.choice_box(popup)
+                local clip={font=popup.font,scale=popup.scale,clip={math.max(0,x),math.max(0,y),
+                    math.min(surface.width,x+width),math.min(surface.height,y+height)}}
+                choices(popup,clip)
+            end
+            for _,w in ipairs(state.order) do if w.kind=='toast' then draw_widget(w) end end
+            local tip=state.tooltip
+            if tip and tip.surface==surface and tip.shown and tip.tooltip and tip.tooltip~='' and
+               (not state.modal or tip.modal_root==state.modal) then
+                local width=math.min(surface.width,#ENGINE_UI.characters(tip.tooltip)*6+16)
+                local x=math.max(0,math.min(surface.width-width,tip.ax))
+                local y=math.max(0,math.min(surface.height-21,tip.ay+tip.ah+4))
+                local clip={font='readable',scale=1,clip={0,0,surface.width,surface.height}}
+                rect(clip,x,y,width,21,ENGINE_UI.color('#0B1422'))
+                text(clip,tip.tooltip,x+8,y+7,ENGINE_UI.color(tip.text_color),x+width-5)
             end
             ffi.copy(frame.published_words,frame.words,frame.w*frame.h*4)
             frame.version=frame.version+1;frame.dirty=false;surface.dirty=false
@@ -12075,9 +12898,13 @@ function ENGINE_UI.remove(ctx,name)
     if state.focus==w then ENGINE_UI.focus(ctx,nil) end
     if state.hover==w then state.hover=nil end
     if state.capture==w then state.capture=nil end
+    if state.popup==w then ENGINE_UI.popup(ctx,nil) end
+    if state.tooltip==w then state.tooltip=nil end
+    state.toasts[name]=nil
+    if ENGINE_UI.scrollable[w.kind] then state.wheel_widgets=state.wheel_widgets-1 end
     INPUT_EVENTS.off(ctx,'ui',name)
     for i=#state.order,1,-1 do if state.order[i]==w then table.remove(state.order,i);break end end
-    state.widgets[name]=nil;w.surface.dirty=true
+    state.widgets[name]=nil;w.surface.dirty=true;state.layout_dirty=true
 end
 function ENGINE_UI.clear(ctx)
     local state=ctx.ui_state;if not state then return end
@@ -12139,6 +12966,8 @@ end
 engine.ui=function(ctx,state,args)
     local action=tostring(args[1] or ''):lower()
     if action=='frame' or action=='box' then action='panel' end
+    if action=='icon' then action='image' end
+    if action=='toggle' then action='checkbox' end
     local function fail(why) return false,'UI Error: '..tostring(why) end
     if args._input_handler or INPUT_EVENTS.is_handler('ui',args) then return INPUT_EVENTS.register(ctx,args,'ui') end
     if action=='create' then
@@ -12168,7 +12997,7 @@ engine.ui=function(ctx,state,args)
             scene_width=screen.width or width,scene_height=screen.height or height}
         surface.canvas.frame.output_width,surface.canvas.frame.output_height=surface.scene_width,surface.scene_height
         ctx.canvas_state=selected;ctx.canvas_selected[ctx.context_id or 0]=canvas_selected
-        local ui=ctx.ui_state or {surfaces={},widgets={},order={},styles={},error=''};ctx.ui_state=ui
+        local ui=ctx.ui_state or {surfaces={},widgets={},order={},styles={},error='',wheel_widgets=0,toasts={}};ctx.ui_state=ui
         ui.surfaces[#ui.surfaces+1]=surface;ui.selected=surface
         if not ctx.input_preview and not ctx.input_viewport then
             ctx.input_preview={width=screen.width or width,height=screen.height or height}
@@ -12237,9 +13066,15 @@ engine.ui=function(ctx,state,args)
         if ui.widgets[name] then return fail('Control '..name..' already exists; use set to change it') end
         local fields,why=ENGINE_UI.attributes(ctx,args,3,ENGINE_UI.allowed(action));if not fields then return fail(why) end
         local w={name=name,kind=action,surface=ui.selected,scope=ctx.active_scope,x=0,y=0,width=200,height=44,
-            visible=true,enabled=true,font='readable',text='',placeholder='',value='',checked=false,password=false,
+            visible=action~='modal' and action~='toast',enabled=true,font='readable',text='',placeholder='',value='',checked=false,password=false,
             max_length=256,min=0,max=100,step=1,caret=0,anchor=0}
+        if ENGINE_UI.scrollable[action] then w.offset=0 end
+        if ENGINE_UI.choices[action] and action~='tabs' then w.row_height=32 end
+        if action=='dropdown' then w.max_rows=6 end
+        if action=='toast' then w.duration=2.5 end
         for key,value in pairs(fields) do w[key]=value end
+        if action=='modal' and w.parent then return fail('modal must be a root widget') end
+        if action=='image' and not (ctx.sprite_states and ctx.sprite_states[w.sprite]) then return fail('Define the image sprite first') end
         if w.style and not ui.styles[w.style] then return fail('Define style '..w.style..' before using it') end
         if w.tabs then
             local tabs=ui.widgets[w.tabs]
@@ -12249,20 +13084,31 @@ engine.ui=function(ctx,state,args)
         elseif w.tab then return fail('tab requires tabs:control_name') end
         if w.parent then
             local p=ui.widgets[w.parent]
-            if not p or p.kind~='panel' or p.surface~=w.surface then return fail('parent must be an existing panel on this UI') end
+            if not p or not ENGINE_UI.containers[p.kind] or p.surface~=w.surface then
+                return fail('parent must be an existing frame, scroll, or modal on this UI')
+            end
         end
         w.inline={};for key,value in pairs(fields) do
             if ENGINE_UI.defaults[key]~=nil or key=='font' then w.inline[key]=value end
         end
         ENGINE_UI.apply_style(w,ui)
         why=ENGINE_UI.validate(w);if why then return fail(why) end
-        if action=='input' or action=='slider' or action=='checkbox' or action=='tabs' then
+        if action=='tree' then w.collapsed={};ENGINE_UI.tree_rows(w) end
+        if ENGINE_UI.valued[action] then
             local value=w.bind and w.scope[w.bind]
-            if value==nil then value=action=='checkbox' and w.checked or action=='slider' and (fields.value or w.min) or action=='tabs' and (fields.value or 1) or w.value end
+            if value==nil then
+                if action=='checkbox' then value=w.checked
+                elseif ENGINE_UI.choices[action] then value=fields.value or 1
+                elseif action=='slider' or action=='number' or action=='progress' then value=fields.value or w.min
+                else value=w.value end
+            end
             local ok,err=ENGINE_UI.write(ctx,w,value,false);if not ok then return fail(err) end
             w.caret=#ENGINE_UI.characters(tostring(w.value));w.anchor=w.caret
         end
-        ui.widgets[name]=w;ui.order[#ui.order+1]=w;w.surface.dirty=true;return true
+        if action=='modal' then ui.modal_serial=(ui.modal_serial or 0)+1;w.modal_order=ui.modal_serial end
+        if action=='toast' then ui.toasts[name]=w end
+        if ENGINE_UI.scrollable[action] then ui.wheel_widgets=ui.wheel_widgets+1 end
+        ui.widgets[name]=w;ui.order[#ui.order+1]=w;w.surface.dirty=true;ui.layout_dirty=true;return true
     end
     local w=ui.widgets[name];if not w then return fail('No control named '..name) end
     if action=='off' or action=='clear' or action=='remove' and #args>2 then
@@ -12273,14 +13119,24 @@ engine.ui=function(ctx,state,args)
             return fail('Unknown event '..kind..'; use an event name or all')
         end
         INPUT_EVENTS.off(ctx,'ui',name,kind);return true
-    elseif action=='delete' or action=='remove' or action=='show' or action=='hide' or action=='focus' then
+    elseif action=='delete' or action=='remove' or action=='show' or action=='hide' or action=='focus' or action=='open' or action=='close' then
         if #args~=2 then return fail(action..' takes one control name') end
         if action=='delete' or action=='remove' then ENGINE_UI.remove(ctx,name)
         elseif action=='focus' then
             ENGINE_UI.layout(ctx)
-            if not w.shown or not w.active or w.kind=='panel' or w.kind=='label' then return fail('Control cannot receive focus') end
+            if not w.shown or not w.active or ENGINE_UI.passive[w.kind] or ui.modal and w.modal_root~=ui.modal then
+                return fail('Control cannot receive focus')
+            end
             ENGINE_UI.focus(ctx,w)
-        else w.visible=action=='show';w.surface.dirty=true;ENGINE_UI.layout(ctx) end
+        elseif w.kind=='dropdown' and (action=='open' or action=='close') then
+            ENGINE_UI.layout(ctx)
+            if action=='open' then
+                if not w.shown or not w.active or ui.modal and w.modal_root~=ui.modal then return fail('Dropdown is unavailable') end
+                ENGINE_UI.focus(ctx,w);ENGINE_UI.popup(ctx,w);ENGINE_UI.scroll_to(ctx,w,w.offset,false)
+            elseif ui.popup==w then ENGINE_UI.popup(ctx,nil) end
+        elseif action=='show' or action=='hide' or w.kind=='modal' or w.kind=='toast' then
+            ENGINE_UI.set_visible(ctx,w,action=='show' or action=='open')
+        else return fail('Use open or close with a modal, toast, or dropdown') end
         return true
     elseif action=='paste' or action=='copy' then
         if #args~=2 or w.kind~='input' then return fail(action..' takes one input control name') end
@@ -12295,13 +13151,15 @@ engine.ui=function(ctx,state,args)
         if not fields.into then return fail(action..' needs -> | variable or into:variable') end
         ENGINE_UI.sync(ctx);ENGINE_UI.layout(ctx)
         local value=ENGINE_UI.value(w)
-        if action=='value' and value==nil then return fail('Only inputs, checkboxes, and sliders have values') end
+        if action=='value' and value==nil then return fail('This control has no value') end
         if action=='get' then value={name=w.name,kind=w.kind,text=w.items and w.items[w.value] or w.text,value=value,checked=w.checked and 1 or 0,
-            x=w.ax,y=w.ay,width=w.width,height=w.height,visible=w.shown and 1 or 0,enabled=w.active and 1 or 0,
-            focused=ui.focus==w and 1 or 0,hovered=ui.hover==w and 1 or 0} end
+            x=w.ax,y=w.ay,width=w.aw,height=w.ah,visible=w.shown and 1 or 0,enabled=w.active and 1 or 0,
+            focused=ui.focus==w and 1 or 0,hovered=ui.hover==w and 1 or 0,offset=w.offset,
+            open=(ui.popup==w or (w.kind=='modal' or w.kind=='toast') and w.shown) and 1 or 0} end
         local result=update_variable_state(ctx,fields.into,value);if is_fatal(result) then return fail(result.msg) end;return true
     elseif action=='set' then
-        local allowed=ENGINE_UI.allowed(w.kind);allowed.parent=nil;allowed.bind=nil;allowed.tabs=nil;allowed.tab=nil;allowed.items=nil
+        local allowed=ENGINE_UI.allowed(w.kind);allowed.parent=nil;allowed.bind=nil;allowed.tabs=nil;allowed.tab=nil
+        if w.kind=='tabs' then allowed.items=nil end
         local fields,why=ENGINE_UI.attributes(ctx,args,3,allowed);if not fields then return fail(why) end
         local candidate={};for k,v in pairs(w) do candidate[k]=v end;for k,v in pairs(fields) do candidate[k]=v end
         if candidate.style and not ui.styles[candidate.style] then return fail('No style named '..candidate.style) end
@@ -12309,18 +13167,29 @@ engine.ui=function(ctx,state,args)
         for k,v in pairs(fields) do if ENGINE_UI.defaults[k]~=nil or k=='font' then candidate.inline[k]=v end end
         ENGINE_UI.apply_style(candidate,ui)
         why=ENGINE_UI.validate(candidate);if why then return fail(why) end
-        if (w.kind=='slider' or w.kind=='tabs') and not ENGINE_UI.normalize(candidate,candidate.value) then return fail('Invalid numeric value') end
-        for k,v in pairs(fields) do if k~='value' and k~='checked' then w[k]=v end end
+        if w.kind=='image' and not (ctx.sprite_states and ctx.sprite_states[candidate.sprite]) then return fail('Define the image sprite first') end
+        local value=fields.value
+        if w.kind=='checkbox' then value=fields.checked;if value==nil then value=w.checked end
+        elseif value==nil then
+            value=w.value
+            if fields.items then value=math.max(1,math.min(#fields.items,value)) end
+        end
+        if ENGINE_UI.valued[w.kind] and ENGINE_UI.normalize(candidate,value)==nil then return fail('Invalid value for '..name) end
+        for k,v in pairs(fields) do
+            if ENGINE_UI.layout_fields[k] and w[k]~=v then ui.layout_dirty=true end
+            if k~='value' and k~='checked' and k~='visible' then w[k]=v end
+        end
+        if w.kind=='tree' and (fields.items or fields.depths) then w.collapsed={};ENGINE_UI.tree_rows(w) end
         w.inline=candidate.inline
         ENGINE_UI.restyle(ui)
-        if w.kind=='input' or w.kind=='slider' or w.kind=='checkbox' or w.kind=='tabs' then
-            local value=fields.value
-            if w.kind=='checkbox' then value=fields.checked;if value==nil then value=w.checked end
-            elseif value==nil then value=w.value end
+        if ENGINE_UI.valued[w.kind] then
             local ok,err=ENGINE_UI.write(ctx,w,value,false);if not ok then return fail(err) end
             w.caret=#ENGINE_UI.characters(tostring(w.value));w.anchor=w.caret
+            w.draft=nil
         end
+        if fields.visible~=nil then ENGINE_UI.set_visible(ctx,w,fields.visible) end
         w.surface.dirty=true;ENGINE_UI.layout(ctx)
+        if ENGINE_UI.scrollable[w.kind] then ENGINE_UI.scroll_to(ctx,w,w.offset,false) end
         if ui.focus and (not ui.focus.active or not ui.focus.shown) then ENGINE_UI.focus(ctx,nil) end
         if ui.capture and (not ui.capture.active or not ui.capture.shown) then ui.capture=nil end
         return true
@@ -17705,6 +18574,7 @@ engine["stop"] = function(src, state, args)
     if target == "all" then
         local owner=src.native_worker_program or src
         owner.model_preloads=nil
+        src.input_actions=nil
         if engine_sound_clear then engine_sound_clear(src) end
         if ENGINE_UI then ENGINE_UI.clear(src) end
         input_host.clear_pending(src)
@@ -20018,7 +20888,10 @@ function engine_scene_gate(ctx,now)
             local held=ctx.input_event_poll and ctx.input_event_poll.input_previous or {}
             ctx.scene_pause_releases={}
             for id,binding in pairs(ctx.input_handlers or {}) do
-                if binding.code and binding.code.family=='input' and binding.code.kind=='release' and held[binding.code.key] then
+                local code=binding.code
+                local action=code and code.family=='input_action' and ctx.input_actions and ctx.input_actions[code.key]
+                if code and code.kind=='release' and (code.family=='input' and held[code.key] or
+                   action and action.events.down) then
                     ctx.scene_pause_releases[id]=binding
                 end
             end
@@ -20033,7 +20906,7 @@ function engine_scene_gate(ctx,now)
             if ctx.input_event_poll then input_host.clear_pending(ctx.input_event_poll) end
             ctx.input_event_streams=nil
             for _,binding in pairs(ctx.input_handlers or {}) do
-                if binding.code and (binding.code.family=='input' or binding.code.family=='ui') then
+                if binding.code and (binding.code.family=='input' or binding.code.family=='input_action' or binding.code.family=='ui') then
                     binding.pending=nil;binding.pointer=nil
                 end
             end
@@ -20076,6 +20949,7 @@ function engine_scene_gate(ctx,now)
     for id,binding in pairs(ctx.scene_pause_releases or {}) do
         if ctx.input_handlers and ctx.input_handlers[id]==binding then
             INPUT_EVENTS.emit(binding,{key=binding.code.key,kind='release',dt=0,down=0,pressed=0,released=1,
+                action=binding.code.family=='input_action' and binding.code.key or nil,
                 focused=0,x=-1,y=-1,mouse_inside=0})
         end
     end
@@ -20105,6 +20979,7 @@ function run_code(src, settings, restart_scene_id, restart_screen)
         return
     end
     INPUT_EVENTS.clear(src)
+    src.input_actions=nil
     if engine_sound_clear then engine_sound_clear(src) end
     if ENGINE_UI then ENGINE_UI.clear(src) end
     input_host.clear_pending(src)
@@ -20461,10 +21336,10 @@ function compile_block_text(src, raw_code, ctx_id)
             if step_text:match('^!ui%s*|') then
                 local parts=split_command_args_safe(step_text:sub(2))
                 local action=parts and safe_trim(parts[2] or '')
-                if action=='frame' or action=='box' or action=='panel' then
+                if action=='frame' or action=='box' or ENGINE_UI.containers[action] then
                     local body=parts[#parts] and safe_trim(parts[#parts])
                     if body and body:match('^%b{}$') and #parts>=4 then
-                        table.remove(parts);parts[2]='panel'
+                        table.remove(parts);parts[2]=ENGINE_UI.containers[action] and action or 'panel'
                         if ui_parent then
                             local explicit=false
                             for i=4,#parts do for _,field in ipairs(split_named_attribute_group(parts[i]) or {}) do
@@ -20479,7 +21354,8 @@ function compile_block_text(src, raw_code, ctx_id)
                         replaced=true
                     end
                 end
-                if not replaced and ui_parent and parts and (ENGINE_UI.kinds[action] or action=='frame' or action=='box') then
+                if not replaced and ui_parent and parts and
+                   (ENGINE_UI.kinds[action] or action=='frame' or action=='box' or action=='icon' or action=='toggle') then
                     local explicit=false
                     for i=4,#parts do for _,field in ipairs(split_named_attribute_group(parts[i]) or {}) do
                         if field:match('^%s*parent%s*:') then explicit=true end
@@ -22003,7 +22879,7 @@ function script_save(settings)
 end
 
 function script_unload()
-    if src then src.model_preloads=nil end
+    if src then src.model_preloads=nil;src.input_actions=nil end
     obs.utils.script_shutdown = true
     if src and engine_sound_clear then engine_sound_clear(src) end
     if src and ENGINE_UI then ENGINE_UI.clear(src) end
