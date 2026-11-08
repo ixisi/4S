@@ -64,12 +64,7 @@ selected entry program.
 
 Without a header, leaving the scene where Execute started the program
 **stops execution**, including cooperative tasks and handlers. Returning does
-not restart it; press Execute. This prevents subsequent commands from trying
-to use renderers that belong to the previous scene. Scene-bound commands also
-verify the identity of a scene they have already fetched, so a delayed frontend
-notification cannot turn a scene change into a missing-renderer fatal error.
-This adds an identity check, not another frontend lookup or continuous UI poll.
-The cache is refreshed by scene and transition-completion notifications.
+not restart it; press Execute.
 
 Add a super command near the start of the entry program to choose another behavior:
 
@@ -93,8 +88,7 @@ This stops the program on leaving its scene: it cancels tasks and workers,
 closes connections, releases sound/UI/pixel buffers, clears 3D objects and
 animations, and clears program variables/functions. Returning does **not**
 restart it; press Execute to start again. Pre-existing OBS sources remain in
-place. 3D GPU caches follow the renderer's normal cleanup on its next draw or
-source destruction.
+place.
 
 The selected rule lasts until Execute/restart; the last executed rule wins.
 `on_scene_change | continue` deliberately keeps execution running across scenes.
@@ -158,17 +152,14 @@ data, not fatal script errors.
 
 Scene and focus pauses compose: all enabled pause conditions must clear before
 execution resumes. They preserve waits, task lifetimes, frame timing and input
-release behavior as described above. Focus detection uses the existing input
-backends: Linux requires the supported X11 path; macOS retains its documented
-permissions and live-testing limitations. An unavailable backend reports an
-error rather than guessing.
+release behavior as described above. On Linux, focus detection requires X11.
+On macOS, enable the input permissions described in [macOS input](#macos-input).
+Unavailable focus detection reports an error.
 
-Reset/restart/stop requests take effect at a safe tick boundary after the current
-command or callback scope has been restored. Later commands do not execute while
-an action is pending. Program-owned work/state is cleaned up; `!save` values
-remain in OBS settings, and pre-existing user scene sources remain in place.
-Restart uses the captured program location and scene dimensions; press Execute
-after changing scene resolution to capture the new dimensions.
+Reset, restart, and stop prevent subsequent commands from executing. Saved
+values remain in OBS settings, and pre-existing scene sources remain in place.
+Restart uses the original program location and scene dimensions. Press Execute
+after changing scene resolution to use the new dimensions.
 
 #### Model preloading
 
@@ -192,15 +183,12 @@ Listing possible files does not freeze the variable used by a later import.
 Unlisted models load normally, and ordinary imports do not automatically add
 models to the preload cache.
 
-The cache holds parsed geometry, materials, animation definitions and the model's
-default starting pose. Imports from it reuse engine-owned read-only asset data,
-with private transforms, binding names and animation playback state. Geometry
-edits make a private copy before writing; animation publishes private posed
-vertices. Editing or animating one instance does not change another or the
-prepared template. `get` and `snapshot` still return detached copies that scripts
-can modify safely. Import results include `preloaded:1` for a cached instance
-or `preloaded:0` for a normal file load, alongside `ok`, `error` and
-`names`. Check `ok` before using the imported objects.
+Preloaded imports have independent transforms, names, animation playback, and
+editable geometry. Editing or animating one instance does not change another.
+`get` and `snapshot` return independent copies that scripts can modify safely.
+Import results include `preloaded:1` for a preloaded model or `preloaded:0` for
+a normal file load, alongside `ok`, `error`, and `names`. Check `ok` before
+using the imported objects.
 
 ```text
 !!engine | preload | reload | "assets/fox.glb" |+|
@@ -219,19 +207,13 @@ each cache read. After changing a model or its parsed dependencies, use `reload`
 or release and preload it again. Execute, restart, reset, whole-program stop and
 engine unload also release the cache.
 
-These optimizations are enabled by the preload declaration; an import without a
-matching prepared asset keeps the normal loading path. Preparing the default
-pose happens once during preload, including default morph weights and skinning.
-Starting or seeking a particular animation clip still calculates its requested
-pose per instance. Clearing/reloading the cache leaves live instances valid;
-their shared data remains alive until its last user is released.
+Preloading applies only to the explicitly listed assets. It prepares the
+model's default pose; starting or seeking an animation selects its pose later.
+Clearing or reloading preloaded assets leaves displayed instances valid.
 
-This trades startup preparation and retained asset memory for less repeated
-parsing, copying and default-pose work. Parsing and preparing one file are
-synchronous and can exceed the tick budget. GPU buffers and texture decoding/upload are still prepared through
-the renderer when displayed. External texture images remain file references;
-this command does not preload their decoded pixels. Embedded texture bytes are
-retained with the parsed model. Preloading does not guarantee hitch-free imports.
+Preloading uses startup time and memory to reduce repeated model-loading work.
+It does not create visible objects or preload decoded external texture images.
+Large files can delay execution, and importing a preloaded model still takes time.
 
 `!runtime | preload | -> | prepared` returns detached metadata:
 
@@ -240,7 +222,7 @@ retained with the parsed model. Preloading does not guarantee hitch-free imports
 | `models` | Number of retained templates. |
 | `parses` | Successfully committed file parses, including reloads. |
 | `hits` | Cached instances served to imports; a subsequent import validation failure can still count an instance. |
-| `prepare_ms`, `copy_ms` | Cumulative CPU-side asset preparation (including the default pose) and private instance-record setup elapsed milliseconds. `copy_ms` retains its name for compatibility; large immutable arrays are reused rather than deep-copied on cache hits. |
+| `prepare_ms`, `copy_ms` | Cumulative model preparation time and instance setup time, in milliseconds. |
 | `root_bytes` | Total root-file bytes for retained templates, excluding dependent files and parsed memory overhead. |
 | `assets` | Records sorted by path, containing `path`, `format`, `parts`, `vertices`, `triangles`, `root_bytes` and `prepare_ms`. |
 
@@ -586,7 +568,7 @@ To append a record, first declare it with `!var`, then pass its variable name to
 } |+|
 ```
 
-The optional `!else` must immediately follow its `!if`. `!if | condition | { ... } |+|` and `!else | { ... } |+|` also work. Numeric `0` and boolean `false` are false; nonzero numbers and `true` are true. Other strings are not general truthy values. `!for` accepts a list or an inclusive whole-number range, including descending ranges. Bounds and list are captured at loop start. Its iterator's previous value is restored at loop end. Inline blocks are compiled into normal queue commands and count toward the work budget; they can span OBS ticks.
+The optional `!else` must immediately follow its `!if`. `!if | condition | { ... } |+|` and `!else | { ... } |+|` also work. Numeric `0` and boolean `false` are false; nonzero numbers and `true` are true. Other strings are not general truthy values. `!for` accepts a list or an inclusive whole-number range, including descending ranges. Bounds and list are captured at loop start. Its iterator's previous value is restored at loop end. Commands inside inline blocks count toward the work budget and can span OBS ticks.
 
 List loops visit indexes `1` through `#list`; use a dense list without missing
 entries. Blocks can contain nested `!if` and `!for` commands. Invalid condition
@@ -635,21 +617,7 @@ compiled body. Use `!jump | retry |+|` within that body. Enter a function throug
 
 `!label` marks a location; it **does not skip the following commands**. To keep a helper label from running on initial pass, jump around it, put it after a terminating flow, or use `!fn` instead. `!jump | label` branches; `!call | label | optional_name:value | -> | result` enters a label with a return point; `!return` returns. `!if | condition | label | ret |+|` conditionally calls a label, while the form without `ret` jumps. Labels and functions are separate: `!call` and `!jump` do not invoke `!fn` definitions. `!label | <name> |+|` declares a global label usable from compatible contexts.
 
-`startup` is not a reserved macro or automatic entry point in the current
-engine. For example:
-
-```text
-!label | <startup> |+|
-!log | "Preparing the program" |+|
-!var | score | 0 |+|
-```
-
-Here, `<startup>` is simply a global label named `startup`. Its following
-commands run when normal execution reaches them, including the initial pass
-when this is at the top of the entry script. Jumping back to the label runs
-those commands again. It does not register an OBS-startup event or a run-once
-guard. A standalone `<startup>` marker is not valid syntax. Global labels must
-remain outside function and event-handler bodies.
+Declare global labels outside function and event-handler bodies. A jump to a label runs the commands that follow it.
 
 `!loop | count | label_or_{block} |+|` and `!foreach | table | item_name | label |+|` are older forms. For new frame loops, prefer `!for` where possible and place `!wait | frame` deliberately. A tight `!jump` loop with no yield eventually triggers the runaway-script guard.
 
@@ -712,7 +680,13 @@ per call rather than mixing positional and named arguments.
 !canvas | update |+|
 ```
 
-`!canvas | update` is the public readable name for the older `present` action. It publishes a complete copy of the current drawing pixels for the next OBS render. Drawing after that command changes only the working buffer: the preview and projectors keep showing the last published image until another `update`. This prevents incomplete UI redraws from flashing on screen when drawing spans several script ticks. Repeated calls without changes do not copy pixels or force another upload. Each canvas keeps one additional RGBA buffer for its published image (width × height × 4 bytes), reused across updates. A `create` replaces that buffer, while `!canvas | use | name:View |+|` switches to an existing buffer **without clearing it**. Multiple renderers can therefore have separate buffers. `snapshot` remembers the selected buffer's working pixels, and `restore` copies them back; this is useful for an expensive static background under moving sprites. Canvas dimensions may be 1–8192 pixels per side, with a 16-million-pixel total limit.
+`!canvas | update` publishes the current drawing for the next OBS render.
+The preview and projectors show the last published image until the next update.
+Draw the complete frame before calling `update`. Use `!canvas | use | name:View |+|`
+to select an existing buffer without clearing it. `snapshot` saves the selected
+buffer's drawing and `restore` brings it back for reuse as a static background.
+Canvas dimensions are 1–8192 pixels per side, with a 16-million-pixel total limit.
+`present` is an alias for `update`.
 
 Drawing inside a function that has not selected its own canvas inherits the
 nearest caller's selection. This also applies to `!sprite | draw` and
@@ -891,7 +865,7 @@ The packed definition is decoded once at creation, not on every draw.
 
 ### Real 3D renderer
 
-The `3d` renderer draws GPU triangles with a perspective camera and a depth buffer. Boxes and custom meshes can rotate in all three axes and correctly cover objects behind them. The built-in effect lives inside the engine Lua file; this feature needs **no separate `.effect`, module, DLL, or other project file**.
+The `3d` renderer draws GPU triangles with a perspective camera and a depth buffer. Boxes and custom meshes can rotate in all three axes and correctly cover objects behind them. Create it with `!renderer | create | kind:3d`; no separate shader definition is needed.
 
 ```text
 !renderer | create | name:World | kind:3d | width:960 | height:540 |+|
@@ -1012,9 +986,9 @@ or `->`:
 | `stage` | `preparing`, `packing`, `queued`, `uploaded`, `error`, or `cancelled`. |
 | `uploaded` | `0` until all GPU packets are ready, then `1`. |
 | `error` | Error text when preparation or a GPU allocation fails. |
-| `prepare_ms`, `prepare_peak_ms` | Accumulated main-thread time preparing/packing this build, and the longest individual coroutine step, in milliseconds. Updated while preparation runs. |
+| `prepare_ms`, `prepare_peak_ms` | Total mesh preparation time and longest preparation step, in milliseconds. Updated while preparation runs. |
 | `upload_ms`, `upload_peak_ms` | Accumulated time submitting GPU buffers/publishing the replacement, and the longest individual packet step, in milliseconds. Includes old-buffer cleanup at publication. These measure main/graphics-thread calls, not GPU execution time. |
-| `packets`, `packets_uploaded` | Planned GPU packets, and successfully submitted packets. `packets` may increase during uploading if a slow driver call causes a prepared packet to be subdivided. At successful completion these fields agree. |
+| `packets`, `packets_uploaded` | Total upload parts and completed upload parts. The total may change during upload; both values agree when uploading completes. |
 | `buffers_reused` | Uploaded packets that updated a matching idle dynamic GPU buffer instead of allocating a new one. Starts at `0`. |
 | `elapsed_ms` | Wall time from submission to the latest preparation update, then to complete upload or cancellation; includes waiting between callbacks. |
 
@@ -1036,24 +1010,11 @@ the program, reloading the script, or destroying the renderer cancels pending
 work. A playing imported animation's next pose also supersedes a pending
 manual build for its mesh. Cancelled work never publishes later.
 
-The engine divides work into packets; it does not impose a total mesh size
-limit. Uploads adapt to observed driver time: a slow allocation reduces later
-submission sizes, down to 192 vertices; fast allocations gradually restore
-larger submissions, up to 12,288 vertices. Splits preserve whole triangles.
-GPU allocation for one packet remains an indivisible driver operation, so
-this reduces the size of later calls rather than guaranteeing a frame time.
-When the host supports dynamic vertex-buffer updates, async uploads reuse
-idle buffers of exactly the same vertex count. The visible buffer is never
-overwritten while a replacement is being built. A renderer retains at most
-one previous complete generation per mesh as spare buffers; unmatched older
-spares are discarded on the next successful publication. Removing the mesh,
-replacing its world, or destroying the renderer releases its spares. An update
-exception discards that spare and attempts a new allocation. Older hosts
-without this API keep the ordinary allocation path. Dynamic updates can still
-wait inside the driver; reuse does not make a driver call interruptible.
-`async:false` is supported for callers that deliberately want synchronous CPU
-preparation. Ordinary `mesh` calls without `async:true` keep their existing
-behavior and return an object copy if `into:` or `->` is supplied.
+There is no fixed total mesh-size limit; available memory and graphics resources
+still constrain what can be displayed. `async:true` spreads preparation and
+upload work across frames, but does not guarantee a particular frame time.
+Use `async:false`, or omit `async`, for synchronous preparation. The synchronous
+form returns an object copy when `into:` or `->` is supplied.
 
 ### Repeated mesh placements
 
@@ -1082,11 +1043,8 @@ to transform/color/hide the whole batch, `remove` to delete it, or submit
 animation, or automatic synchronization with later changes to the source.
 Save/export preserve the resulting baked geometry.
 
-The `instances` command builds portable **mesh batches**. It reduces draw
-calls but duplicates geometry in memory; very large batches use several GPU
-packets/draws. OBS's [public graphics API](https://github.com/obsproject/obs-studio/blob/master/libobs/graphics/graphics.h)
-provides the portable buffer/draw operations used here, without a public
-hardware-instanced draw entry point.
+`instances` produces one mesh containing all placements. Use `duplicate` when
+each copy needs its own transform or picking identity.
 
 For repeated copies with independent transforms or picking, `duplicate` shares
 the original mesh's immutable vertices, triangles, UVs, and GPU buffers within
@@ -1098,12 +1056,8 @@ remain independent. For example:
 !world3d | set | name:SecondTriangle | x:4,y:0,z:-12 |+|
 ```
 
-Vertex/triangle edits, UV changes, geometry replacement, and animation poses
-detach the changed geometry; other copies retain theirs. The engine releases
-a shared GPU buffer only after its last rendered owner releases it. Snapshots
-and saves still contain ordinary independent object data. Duplicating a whole
-batch shares that batch's geometry too. It does not remove the baked copies
-inside a newly constructed `instances` batch.
+Editing a duplicate's vertices, triangles, UVs, or animation pose does not
+change the other copies. Snapshots and saves contain independent object data.
 
 ### Automatic native instancing
 
@@ -1118,27 +1072,10 @@ size, color, and picking identity. This requires no different script syntax:
 !world3d | stats | -> | rendering |+|
 ```
 
-A group must share its vertices, triangles, UVs, and diffuse texture. Individual
-tints may differ. A different object/material, hidden object, or pending upload
-ends a group. Groups use up to 256 objects per draw; larger runs use further
-draws without limiting scene capacity. Grouping follows scene order, preserving
-the order of ordinary opaque draws. Camera roll, spotlight lighting, textured
-meshes, and multipart geometry buffers are supported. Editing one copy detaches
-its geometry and may split its group. Animation continues to update normally;
-only meshes whose current geometry is actually shared can group. Ordinary
-independently created meshes and the placements baked inside one `instances`
-batch are not automatically converted into shared instances. Saving/loading or
-restoring independent geometry arrays may therefore remove this optimization
-without changing the saved object's appearance or behavior.
-
-The engine compiles its native vertex shader in memory using the Windows
-shader compiler available to OBS. It calls Direct3D through LuaJIT FFI, restores
-the native vertex shader and constant-buffer binding after each draw, and queues
-native resource releases without leaving Lua callbacks behind. No additional
-distributed DLL, library package, model file, or shader file is required.
-Unsupported backends, initialization failures, and failed transform-buffer
-updates use ordinary rendering. Native instancing is currently implemented for
-Windows/D3D11; Linux/macOS retain portable rendering.
+Native instancing can group consecutive visible duplicates that share geometry
+and a diffuse texture. Copies can have different transforms and tints. Editing
+a copy's geometry can take it out of the group. Other platforms draw the same
+objects individually.
 
 `stats` returns the last completed render's statistics, so its values can lag
 script changes until OBS renders that source. `backend` is `"pending"` before
@@ -1146,22 +1083,20 @@ the first completed render, `"portable"` when that render made no instanced
 draws, or `"d3d11_instancing"` when it used native instancing.
 `instance_draws` counts actual instanced draws (including separate mesh packets),
 and `instanced_objects` counts objects drawn through them. `native_available`
-is `1` when native resources have been initialized successfully; initialization
-is lazy, so `0` alone does not indicate unsupported hardware. A D3D11 draw also
-uses a one-vertex, triangle-free OBS draw to synchronize its state before the
-native submission; `instance_draws` does not count those setup draws. These
-fields describe the last redraw, not a cumulative FPS counter.
+is `1` when native instancing is ready. A value of `0` before the first draw
+does not by itself indicate unsupported hardware. These fields describe the
+last redraw, not a cumulative FPS counter.
 As with other GPU transform paths, floating-point rounding can change a few
 edge pixels or depth ties between overlapping coplanar surfaces; avoid relying
 on such depth ties for layering.
 
-For a textured mesh, `uvs:"0,0;1,0;0,1"` supplies one `u,v` pair per vertex. Use `texture:"images/diffuse.png"` for a PNG/JPEG file, or `image:"...base64..." | mime:"image/png"` for image data embedded in the script. `texture` paths use the selected main program's folder in File mode, or the engine Lua file's folder in Text/Input mode. Embedded images are passed to OBS's image loader through a temporary file that is removed after loading; they need no extra file in the distributed project. New vertex geometry without new UVs clears the old UVs and texture.
+For a textured mesh, `uvs:"0,0;1,0;0,1"` supplies one `u,v` pair per vertex. Use `texture:"images/diffuse.png"` for a PNG/JPEG file, or `image:"...base64..." | mime:"image/png"` for image data embedded in the script. `texture` paths use the selected main program's folder in File mode, or the engine Lua file's folder in Text/Input mode. Embedded images need no separate image file in the distributed project. New vertex geometry without new UVs clears the old UVs and texture.
 
 ### Camera-view textures and clipping planes
 
 A named `view` is another camera into the **same selected world**. Bind it to
 a mesh with UV coordinates to create a live screen, window, or portal surface.
-It is rendered internally; it does not create another OBS source.
+It does not create another OBS source.
 
 ```text
 !renderer | create | name:World | kind:3d | width:960,height:540 |+|
@@ -1306,8 +1241,7 @@ The programmer explicitly chooses a `.effect` file with `!shader | select`. Path
 
 `!physics` calculates collisions and rigid-body motion from ordinary copied
 tables. It does not create renderer objects, change OBS sources, or add game
-rules. The solver is embedded in the engine Lua file and needs no physics DLL,
-module, or package. Supported shapes are oriented boxes and spheres.
+rules. Supported shapes are oriented boxes and spheres.
 
 ```text
 !var | state | {
@@ -1427,17 +1361,14 @@ Returned fields:
 | `hits` | Records `{id,speed}` for bodies with incoming contact speeds above `0.8`. This is reporting data; the engine does not apply damage or fracture. |
 | `stats` | `bodies`, `awake`, `sleeping`, `pairs`, `contacts`, `ccd_hits`, `substeps`, and `solve_ms`. Pair/contact/swept-hit counts accumulate across this call's substeps. `solve_ms` measures kernel wall time, including validation and copying, using the host's monotonic clock when available (Lua clock fallback); it is not rendering FPS or GPU time. |
 
-The solver uses oriented-box separation tests, contact impulses with friction,
-angular inertia, contact warm starting, and iterative joints. It is an
-approximate real-time solver: deep initial overlaps, extreme size/mass ratios,
+Physics is approximate: deep initial overlaps, extreme size/mass ratios,
 long joint chains, and large steps can cause drift or instability. Swept tests
 currently cover **moving spheres** against boxes/spheres. Target translation is
 included; target rotation is approximated within each substep. Fast boxes and
 arbitrarily rotating shapes do not have full continuous collision detection.
 There are no mesh/convex-hull colliders, cloth, fluids, joint motors, or arbitrary
-constraint graphs with guaranteed stability. Use smaller substeps and measured
-stress tests rather than assuming a particular body count will meet a frame
-budget.
+constraint graphs with guaranteed stability. Smaller substeps can improve
+stability at the cost of more computation.
 
 ## UI controls
 
@@ -2110,15 +2041,23 @@ check `warped` and provide a fallback. This does not hide the system pointer.
 For a centered mouse-look mode, sample input, calculate movement from the last
 center to the sampled pointer, call `recenter`, then remember its returned center
 for the next sample. Skip the initial movement after activating/focusing the view.
-Only call it while gameplay has control. This is a single cursor movement with no
-hook, clipping region, persistent capture, or extra DLL; stopping calls immediately
-releases control, including on pause, Stop, reload, and shutdown.
+Only call it while gameplay has control. Each call moves the cursor once;
+stopping the calls leaves the cursor free.
 
-On Windows or macOS, `!input | preview |+|` binds the pointer to the OBS main scene preview or a focused **Preview Projector** window. Its `x` and `y` are active scene canvas coordinates, and `interaction_source` is `ScenePreview` while inside. The engine automatically reads the main preview's Window, Canvas, Output, or manual scaling and scroll positions from OBS's bundled Qt 6 controls; no script setting is needed. Manual scaling is recovered from the displayed scaled dimensions with pixel rounding. Those controls are read asynchronously on OBS's UI thread. Input waits for a valid snapshot after startup or a resize; it does not block OBS. Projectors use their own letterboxed view independently of the main preview's zoom. On Windows, an older OBS/Qt build can use **Scale to Window** for fallback mapping. On macOS, unavailable Qt metadata is reported through `!input | status`; the engine leaves preview pointer input inactive instead of guessing its coordinates. No Interact window or additional library file is needed. `preview` and `viewport` replace each other when called again. UI widgets use this same automatic mapping.
+On Windows or macOS, `!input | preview |+|` maps the pointer to the OBS main
+scene preview or focused **Preview Projector**. Its `x` and `y` are scene canvas
+coordinates, and `interaction_source` is `ScenePreview` while inside. Window,
+Canvas, Output, and manual preview scaling, scrolling, and projector letterboxing
+are detected automatically. UI widgets use the same mapping.
+
+Input can briefly read zero after startup or resizing while the view becomes
+ready. Use `!input | status` to check readiness and errors. On older Windows OBS
+versions, **Scale to Window** provides fallback mapping. `preview` and
+`viewport` replace each other when called again.
 
 On Windows, use `!input | preview | focus |+|` to bind the preview and request keyboard focus for it on OBS's UI thread. This is useful at game startup or after a click inside the game: otherwise a previously selected zoom dropdown or source list can still react to the game's arrow keys. The request is asynchronous and does not bring OBS in front of another application. A focused Preview Projector keeps its focus. This does not disable OBS shortcuts or consume keys; keep game renderer scene items locked if arrow keys should not nudge them in OBS.
 
-`!projector | fullscreen | monitor:0 |+|` opens OBS's current Preview Projector fullscreen on monitor index 0. The monitor attribute is optional and defaults to 0; use `monitor:1` for the next display. The projector follows OBS's current preview scene. Esc closes the projector window and returns to the main OBS preview; OBS stays open. To bind a key in a frame loop, include `F` in an input snapshot, then call `!if | keys.F_pressed == 1 { !projector | fullscreen | monitor:0 |+| } |+|`. On Windows and macOS, the command queues the request for OBS's UI thread and returns immediately; the window appears when that thread processes it. It also binds focused keyboard and scene-relative mouse input to the Preview Projector, so movement and mouse controls continue there without a separate `!input | preview` call. A Preview Projector opened through OBS's own menu is bound automatically when it gains focus. Pressing F while that projector already has focus does not open another. This command uses OBS's frontend API and requires no additional library file.
+`!projector | fullscreen | monitor:0 |+|` opens OBS's current Preview Projector fullscreen on monitor index 0. The monitor attribute is optional and defaults to 0; use `monitor:1` for the next display. The projector follows OBS's current preview scene. Esc closes the projector window and returns to the main OBS preview; OBS stays open. To bind a key in a frame loop, include `F` in an input snapshot, then call `!if | keys.F_pressed == 1 { !projector | fullscreen | monitor:0 |+| } |+|`. On Windows and macOS, the command queues the request for OBS's UI thread and returns immediately; the window appears when that thread processes it. It also binds focused keyboard and scene-relative mouse input to the Preview Projector, so movement and mouse controls continue there without a separate `!input | preview` call. A Preview Projector opened through OBS's own menu is bound automatically when it gains focus. Pressing F while that projector already has focus does not open another.
 
 To keep Esc for a game's pause/menu action, opt in to projector key controls:
 
@@ -2155,17 +2094,15 @@ handler instead, for example `!input | press | F10 | { !projector | close |+| } 
 
 For games that use right-button drag over OBS's preview or a **Preview Projector**, call `!input | preview_menu | block |+|` after `!input | preview |+|`. On Windows, it temporarily prevents those views' right-click menus while direct mouse polling remains available. `!input | preview_menu | allow |+|` restores the original behavior. The engine also restores it when the program stops, when Execute starts a new program, and when the engine reloads. The main preview uses OBS's bundled Qt 6 widget library; Preview Projector uses a temporary Windows window subclass because OBS opens its menu directly on right-button press. Other OBS controls and non-preview projectors retain their menus. No additional file is installed. Other operating systems report an unsupported input error for `block`.
 
-`!input | wheel | wheel_steps |+|` reads relative mouse-wheel movement while OBS has focus and the pointer is inside its main scene preview or focused Preview Projector after `!input | preview |+|`. Positive values mean wheel up; negative values mean wheel down; `0` means no new movement. Fractional values are possible on high-resolution wheels. Read it once per frame: each read consumes the accumulated movement. On Windows it uses the system DirectInput library through LuaJIT FFI, with no project DLL or Interact window. Wheel polling is not yet implemented on Linux or macOS, where this command returns `0`.
+`!input | wheel | wheel_steps |+|` reads relative mouse-wheel movement while OBS has focus and the pointer is inside its main scene preview or focused Preview Projector after `!input | preview |+|`. Positive values mean wheel up; negative values mean wheel down; `0` means no new movement. Fractional values are possible on high-resolution wheels. Read it once per frame: each read consumes the accumulated movement. Wheel polling is not yet implemented on Linux or macOS, where this command returns `0`.
 
-Windows polls the focused OBS main window or Preview Projector; Linux/X11 polls the focused OBS window through the system X11 library. The engine no longer has a command that opens OBS Interact. `!input | viewport | View |+|` remains available if a user manually opens that source's Interact window in OBS. macOS polls Quartz key/button state and maps the main preview or a focused Preview Projector through an isolated Lua state on macOS's asynchronous main queue. It does not require Interact. Live macOS behavior remains unverified. A window cannot receive a key while another window owns keyboard focus. `!onpress | HotkeyName | pressed_label | optional_released_label |+|` is an alternative: it registers an OBS hotkey, which the user binds in OBS Settings → Hotkeys.
+Direct input requires a focused OBS window. Windows and macOS support the main
+preview and Preview Projector; Linux direct polling requires X11.
+`!input | viewport | View |+|` can bind an existing source Interact window.
+`!onpress | HotkeyName | pressed_label | optional_released_label |+|` registers
+an OBS hotkey that the user assigns in **OBS Settings → Hotkeys**.
 
 ### macOS input
-
-macOS uses its installed ApplicationServices/Carbon frameworks and OBS's bundled
-LuaJIT/Qt libraries. No additional package or project DLL is installed. Keyboard
-and button state come from [Quartz Event Services](https://developer.apple.com/documentation/coregraphics/cgeventsource/keystate(_:key:)?language=objc).
-OBS's preview geometry is read on its UI thread in an isolated Lua state;
-callbacks do not enter the running program's Lua state from another thread.
 
 Enable **OBS** under **System Settings → Privacy & Security → Input Monitoring**
 when permission is denied, then restart OBS if macOS requests it. The engine
@@ -2182,25 +2119,22 @@ Accessibility and Screen Recording access are not requested by this backend.
 `status` returns `platform`, `backend` (`quartz`, `win32`, `x11`, `interact`, or
 `unsupported`), `available` (0/1), `permission` (`granted`, `denied`, or
 `not_required`), `ready` (0/1), and `error`. On macOS, `available` describes the
-native backend; `ready` describes the most recent view geometry. The first UI
-sample is asynchronous, so `ready:0` during startup is normal. Keys can still
-work when a Qt version cannot expose preview geometry; inspect `error`.
+input availability; `ready` indicates whether pointer mapping is ready.
+A value of `ready:0` during startup is normal. Keys may work even when preview
+pointer mapping is unavailable; inspect `error`.
 
 The main preview requires OBS with Qt 6 metadata support. Window/Canvas/Output
 and manual zoom, scroll position, Retina backing scale, negative monitor
 coordinates, and Preview Projector letterboxing are accounted for. Input stops
-when another application or an unrelated OBS dialog has focus; UI snapshots
-older than 250 ms are rejected. During focus changes or while waiting for a
-fresh snapshot, input may briefly read zero. macOS callbacks and snapshot storage
-are released asynchronously in main-queue order on engine unload/shutdown.
+when another application or an unrelated OBS dialog has focus. During focus
+changes, input may briefly read zero.
 
 macOS keyboard polling includes both Shift/Control/Option/Command keys, the
 number pad, and both Enter keys. `ALT` means Option; `META`, `CMD`, and `COMMAND`
 mean Command. Text fallback uses a US key layout, one character per key press;
 it does not provide international layout translation, key repeat, or IME
 composition. Wheel polling, preview-menu suppression, projector key overrides,
-and automatic preview focus remain unavailable on macOS. The implementation
-has mocked Intel/Apple Silicon coverage; it still needs a live macOS OBS test.
+and automatic preview focus remain unavailable on macOS.
 
 | Input action | Fields after action | Output |
 | --- | --- | --- |
@@ -2301,7 +2235,7 @@ remember `stats.ui_surface` and restore it with `!ui | use | canvas_name |+|`
 so subsequent application controls stay on the intended canvas. Hiding a UI
 retains its bounded canvas storage for reuse; Stop/Execute/unload release the
 normal engine-owned UI resources. Measurements include the diagnostic UI's own
-work. Keep live OBS testing and resource observations alongside these counters.
+work.
 
 ## Event handlers
 
@@ -2465,10 +2399,6 @@ Stopping all script work, Execute/restart, fatal main-program failure, and unloa
 clear all block handlers. Registered handlers keep the program alive after its
 main statements end, including its open connections.
 
-Runnable syntax examples are in `examples/event-handlers/`: `main.txt` combines
-input, worker, and variable events; `mesh.txt`, `animation.txt`, `collision.txt`,
-and `connection-host.txt` / `connection-guest.txt` demonstrate the other forms.
-
 ## Sources and OBS
 
 `!use_sources` selects one or more **direct items in the active scene** by exact name. Subsequent source methods and movement/effect commands apply to that selection. Missing names produce an error containing the active scene name. An empty `!use_sources |+|` restores the original source selection. `!source` is the older alias.
@@ -2537,11 +2467,11 @@ Two kinds of concurrent-looking work are available:
 | Kind | Syntax | What runs where |
 | --- | --- | --- |
 | Cooperative task | `!start_task \| label_or_{block} \|+\|` or `!start_independent_task \| label_or_{block} \| -> \| task_name \|+\|` | Commands are scheduled across OBS ticks on the script/main thread. They may read or change OBS sources. The independent form starts with a new context and no selected source. |
-| Native worker | `!worker \| (expression) \| result_name \|+\|`, `!worker \| { ... } \| result_name \|+\|`, or `!worker \| computation_label \| result_name \|+\|` | An isolated LuaJIT computation runs on an OS thread. It gets copied data and cannot manipulate OBS sources. |
+| Native worker | `!worker \| (expression) \| result_name \|+\|`, `!worker \| { ... } \| result_name \|+\|`, or `!worker \| computation_label \| result_name \|+\|` | A computation runs on a separate native thread. It gets copied data and cannot manipulate OBS sources. |
 
 `!await | task_name |+|` waits for a cooperative task; `!await | (condition) |+|` waits for a condition. `!stop | task_name |+|` cancels matching tasks; `!stop | all |+|` stops script work and native workers. The older `!run` and `!spawn` are aliases for the two cooperative forms. `!attach` starts a task bound to a source. These are **not** native threads.
 
-A native worker writes a result table to `result_name`; check `result_name.state` for `running`, `done`, `error`, or cancellation before using its value. Work is bounded and its input is copied. `!worker | read | job | result_table |+|` takes a nonblocking snapshot of a legacy `start` job. Use `cancel`, `release`, or the scoped cleanup commands below to manage jobs. Built-in legacy computations include `sum` and grid `path`. OBS operations belong on the main thread. Workers use the platform's native thread facilities through LuaJIT FFI, without a project-specific DLL.
+A native worker writes a result table to `result_name`; check `result_name.state` for `running`, `done`, `error`, or cancellation before using its value. Work is bounded and its input is copied. `!worker | read | job | result_table |+|` takes a nonblocking snapshot of a legacy `start` job. Use `cancel`, `release`, or the scoped cleanup commands below to manage jobs. Built-in legacy computations include `sum` and grid `path`. OBS operations belong on the main thread.
 
 ### Returning copied data from workers
 
@@ -2572,8 +2502,7 @@ then return its variable name. `job.value` contains the copied result after
 Inputs are copied at launch; only root variables referenced by the reachable
 worker expressions are included. Unrelated large scene tables are not copied.
 The worker cannot call main-script functions or read later changes to its inputs.
-Returned data is copied back through a typed binary format, never evaluated as
-code. No Lua state pointers or shared mutable tables cross the thread boundary.
+Returned data is copied back as values, never executed as commands.
 Changing a returned table cannot alter the worker's former input or another job.
 
 Workers can also write fields and indexed entries in their **copied tables**:
@@ -2620,11 +2549,8 @@ Missing intermediate tables or invalid runtime keys fail the job with
 instruction and copied-data limits still apply.
 
 Inputs allow at most 6 nested table levels, 524288 inspected values/keys, and
-4 MiB of serialized worker payload (including program metadata). This replaces
-the older 256 KiB / 16384-value input allowance. Capture still happens during
-the launch command and can exceed its tick budget for large states. Repeated
-field/value literals are cached only within that fresh capture; no live values
-are reused across launches.
+4 MiB of serialized worker payload. Large inputs can delay the launch command.
+Each launch reads fresh values from the visible scope.
 
 Results permit at most 16 nested table levels and 4 MiB of encoded data per
 script job. Cycles, functions, unsupported keys, and non-finite numbers fail the
@@ -2632,56 +2558,15 @@ job with `state:"error"`; inspect `job.error`. Cancellation is checked during
 computation and large result encoding. Large results also take main-thread time
 to decode, so divide work into manageable jobs when responsiveness matters.
 
-This 4 MiB value is the encoded-result limit, not a per-job reservation.
-Numeric scalar results need no transfer buffer. Other results start with
-1 KiB of worker-owned storage, which grows as needed. Dense numeric arrays
-use a compact binary representation and are decoded in bounded blocks;
-scripts still receive ordinary copied tables. Encoding writes directly into
-native storage, avoiding an additional full-result string and copy. The
-storage stays owned by its runtime until decoding finishes or cancellation
-discards it, then its ownership is released.
+Workers receive copied inputs from the scope visible when they start. Changes
+to the caller's variables after launch do not change a running job's inputs.
+A later launch reads the current values again. Each job has independent local
+variables and results.
 
-During a running program, worker-result decoding and asynchronous mesh
-preparation run after foreground commands and collision processing. A small
-slice is reserved for pending background work, and the first background
-consumer alternates each tick. Both use the same overall script tick budget.
-An `!await` or frame wait leaves more time for these jobs; worker results and
-meshes become visible only after their complete result is published.
-
-### Worker preparation and input copies
-
-Validated label programs are cached, including their branch structure and input
-requirements. Statically named label jobs are prepared after program compilation,
-before gameplay executes; inline blocks are cached when first reached. A cache
-stores code metadata, not live scope values or worker results.
-Changed compiled steps or label targets invalidate the label cache. Execute/reload
-creates fresh program caches. Cache eviction can require preparation again and
-does not limit how many different computations a program may use.
-
-The engine compiles its built-in worker bootstrap once in memory and keeps
-up to four isolated LuaJIT runtimes per running program. A runtime is reused
-only after its previous OS thread has joined and its result has been fully
-decoded or discarded. Each invocation has fresh copied inputs, job variables,
-expression environments, and result storage. No job can enter a runtime while
-another job or its decoder owns it. Each launch still creates a new OS thread;
-the pool avoids rebuilding the LuaJIT state and callback on repeated launches.
-Program-wide worker cleanup, Stop, Execute, reload, and unload close these
-runtimes after joining their jobs. Scoped cleanup leaves idle runtimes
-available to the rest of the same program. This adds no runtime files or
-dependencies.
-
-Every actual launch still captures **fresh copied inputs during that command**.
-Input analysis follows branches and loops: a variable whose old value is
-overwritten before every possible read does not need to be copied. A variable
-read before assignment on even one possible path remains an input. Scope lookup
-selects the currently visible value, including `false`, rather than copying
-shadowed parent values too. Existing alias variables and intermediate indexes
-continue working.
-
-Program compilation may take more time up front, while repeated launches avoid
-rebuilding the same program. Input copying, a cold runtime, OS thread creation,
-and result decoding still have a cost. One command can still exceed the script tick budget; this
-optimization does not make native startup preemptible or guarantee a frame rate.
+Large inputs and returned tables take time to transfer. Divide work into
+manageable jobs and use `!await` or `!wait | frame` while waiting. Results are
+available only when their complete value has been delivered; check `state`
+before reading them.
 
 ### Repeating a worker start
 
@@ -2732,8 +2617,7 @@ invocation, or separate task. `clear | program` affects every owner in the
 current program. `clear | all` and `stop_all` remain program-wide compatibility
 forms; use `scope` or `program` to make new code's intent explicit.
 
-Cleanup requests cancellation of all selected jobs before joining and releasing
-them. Results already finished remain finished; jobs that process cancellation
+Cleanup cancels and releases the selected jobs. Results already finished remain finished; jobs that process cancellation
 report `state:"cancelled"`. Retained result-table references are updated before
 the jobs are removed, so they do not remain stuck at `state:"running"`.
 Cleanup does not wait for unrelated owners' jobs. `cancel | name` requests
@@ -2771,14 +2655,9 @@ program completion and shutdown clean up all program workers.
 
 Within a worker block/label, the supported commands are `!var`, `!array.push`, `!if` (label form), `!jump`, `!label`, and a required reachable `!return`. Pure worker expressions are bounded arithmetic/comparisons, not arbitrary Lua. A worker label may contain at most 1,024 reachable commands and execute at most 1,000,000 interpreted steps per run. The engine allows up to four running and eight retained jobs; copied input has a 4 MiB budget (up to 524,288 inspected values, six nested table levels, and 64 KiB per string). Result states are `running`, `done`, `error`, and `cancelled` (double **l**). Release finished jobs when you no longer need them.
 
-Input values are captured completely at launch, using one validation/encoding
-pass. Later writes in the main program cannot change that worker's input.
-Capturing and starting a worker still cost main-thread time. Large returned
-tables are decoded directly from the worker's owned binary buffer in small
-slices within the tick budget. The job stays `running` until the whole result
-is ready; scripts never see a partially decoded `value`. Cancellation during
-decoding discards that result and releases its native storage. Existing
-`!await`, `read`, cancellation, and automatic-result syntax remain unchanged.
+Large inputs or results can delay worker launch or result delivery. The job
+stays `running` until its complete result is ready; scripts never receive a
+partial `value`. Cancelling a job discards any unfinished result.
 
 Worker result/status records also expose these numeric profiling fields. They
 do not change the worker's returned `value`:
@@ -2792,7 +2671,7 @@ do not change the worker's returned `value`:
 | `elapsed_ms` | Wall time from launch command to result delivery or cancellation, including worker execution, scheduling, and decoding. This is not isolated worker CPU time. |
 | `input_bytes`, `output_bytes` | Encoded input payload/map bytes and binary result bytes. Built-in numeric/path results do not use the binary table format. |
 | `result_capacity_bytes` | Final native result-buffer capacity; `0` for numeric scalar results. Available on the delivered result, including errors/cancellation. |
-| `runtime_reused` | `1` when launch rented an existing idle LuaJIT runtime, otherwise `0`. This does not mean the OS thread was reused. |
+| `runtime_reused` | `1` when the launch reused a prepared worker execution context; otherwise `0`. Inputs and results remain independent for every job. |
 
 Finished records returned by `read` contain these fields too. Timings use the
 engine's monotonic clock where available, with its existing process-clock
@@ -2815,12 +2694,10 @@ For example:
 `!connection` creates a dedicated encrypted game messaging channel. It does not
 connect to OBS's remote-control WebSocket service, use its password, or expose
 scene/streaming controls. Received messages are data; they are not executed as
-commands. No external lobby account, helper process, or project DLL is required.
+commands.
 
 `!websocket` remains an alias for existing scripts. `!network` remains available
-for the older TCP API; it has not been removed or renamed. New scripts can use
-`!connection` with the commands below. The underlying WebSocket protocol and
-private invitation format are unchanged.
+for TCP connections. Use `!connection` with the commands below. 
 
 ### Host and join with one private code
 
@@ -2845,13 +2722,10 @@ private invitation format are unchanged.
 !jump | messages |+|
 ```
 
-Share the host's code privately. Complete codes begin with `IM3WSS1-` and use at
-most 152 characters. They carry the host IPv4 address, listening port,
-certificate pin, and random invitation secret. Players can use one hidden code
-field; the engine handles the endpoint details. The address is encoded, not
-encrypted inside the code. Anyone holding the code can attempt to join. Closing
-and recreating the host invalidates its old credentials. Generate a new code
-when switching from the older TCP transport.
+Share the host's code privately with the intended guest. Complete codes begin
+with `IM3WSS1-` and contain at most 152 characters. The guest supplies the code
+to `join` without separate address or port fields. Closing and recreating the
+host invalidates its old invitation.
 
 Keep a frame loop or registered event handler alive: socket work runs on OBS
 ticks, and `receive` pops one queued event without waiting. Program completion
@@ -2898,51 +2772,33 @@ after it connects and covers TLS, WebSocket upgrade, and invitation verification
 Incomplete messages have a read deadline. Buffer accounting includes fragments
 and their metadata; control frames are also subject to rate protection.
 
-### Protocol, security and portability
+### Connection requirements
 
-This is a dedicated [RFC 6455](https://www.rfc-editor.org/rfc/rfc6455.html)
-profile: TLS (`wss`), HTTP path `/4im3`, subprotocol `4im3.messages.v1`, client
-masking, fragmented messages, Ping/Pong, Close, and UTF-8 checks for text/close
-reasons. Compression/extensions are not negotiated. Binary messages use a
-one-byte application tag: `A` plus the raw 32-byte invitation secret, `K` for
-authentication acknowledgement, `T` plus string bytes, or `J` plus JSON
-`{"data":...}`. Application join events/messages are released only after private
-authentication succeeds. The SHA-1 accept hash required by RFC 6455 is used
-only for the public HTTP upgrade; certificate pinning uses SHA-256.
+Connections are encrypted and authenticated using private invitations.
+They do not use or share the OBS WebSocket password. Keep invitation codes
+private. Scripts define the messages they send and how received data is used.
 
-TLS 1.2 ECDHE/AES-GCM, certificate pinning and the random 256-bit secret use the
-existing native TLS provider: built-in Schannel/CNG on Windows, or an already
-installed compatible OpenSSL 1.1.1/3 on Linux/macOS. Unavailable TLS fails closed.
-No OBS password is shared. A standard WebSocket client must implement this
-application profile and pin verification; browser certificate trust is not
-automatically configured.
+On Linux/macOS, encrypted connections require an installed compatible
+OpenSSL 1.1.1 or 3 library. If encryption is unavailable, joining or hosting
+reports an error rather than using an unencrypted connection.
 
-A received Close is echoed with a bounded close period. Explicit close, Stop,
-reload, and shutdown release owned sockets/TLS resources without waiting for
-the remote machine. These protections do not guarantee immunity to every attack
-or internet bandwidth floods.
+The guest must be able to reach the host through the network and firewall.
+A private code supplies connection details but does not provide a relay,
+internet lobby, router configuration, or automatic reconnection.
 
-**Network reachability is still required.** WebSocket uses TCP underneath; it
-does not relay traffic, discover internet lobbies, traverse NAT, bypass a
-firewall, or repair device isolation. A private code simplifies entry but does
-not make an unreachable host reachable. The engine handles transport and
-authentication; scripts define their message formats and synchronization rules.
-
-The older `!network` API remains available for existing programs. `!connection`
-adds a real HTTP upgrade and WebSocket framing over the shared native socket/TLS
-and lifecycle implementation.
+`!connection` uses the engine's WebSocket messaging format; a generic browser
+WebSocket connection is not a substitute for `!connection | join`.
+`!network` provides the separate TCP commands below.
 
 ## TCP networking
 
-`!network` provides generic TCP host/client connections through LuaJIT FFI:
-Winsock on Windows, POSIX sockets on Linux/macOS. **Connections use encrypted,
-invitation-authenticated TLS by default.** No project DLL, Python process,
-networking package, or OBS WebSocket connection is required.
+`!network` provides TCP host/client connections. Connections use encrypted,
+invitation-authenticated TLS by default. It is separate from OBS's remote-control
+WebSocket service.
 
-Windows uses its built-in Schannel/CNG APIs. Linux/macOS use an already
-installed OpenSSL 1.1.1/3 library discoverable by the system loader. If a
-compatible provider is unavailable, the connection reports an error and stays
-closed; it never silently falls back to plaintext.
+On Linux/macOS, encryption requires an installed compatible OpenSSL 1.1.1 or 3
+library. If encryption is unavailable, the connection reports an error and
+stays closed rather than silently using plaintext.
 
 ### Host, invite, join
 
@@ -2969,24 +2825,12 @@ closed; it never silently falls back to plaintext.
 !jump | frame |+|
 ```
 
-Share the host's **private invitation** with the intended guest through a trusted
-channel, then copy it on the guest's computer before joining. With `address`
-on `invite`, the engine produces a **complete private connection code**:
-`IM3JOIN1-<8 hex IPv4 digits>-<port>-<64 hex fingerprint>-<64 hex secret>`.
-The guest supplies only `name` and `invite`; the engine decodes the endpoint
-internally. Players do not need address/port fields in the game UI. The format
-is at most 153 characters. The address is encoded, not encrypted; the code is
-a private credential and must be shared privately.
-
-For compatibility, `invite` without `address` still returns the original
-137-character `IM3TLS1.<64 hex certificate fingerprint>.<64 hex secret>`.
-Joining with that older token requires the explicit `port` and host `address`.
-Both formats pin the host's certificate and contain a random 256-bit secret.
-The guest verifies the certificate before sending that secret inside TLS.
-Application `join` events and messages are allowed only after authentication.
-TLS 1.2 is restricted to ECDHE with AES-GCM; packet tampering/replay fails TLS
-integrity checks. An invitation proves possession of the secret, not a person's
-account identity. Anyone who obtains it can attempt to join.
+Share the host's **private invitation** with the intended guest. With
+`address`, `invite` returns a complete code beginning with `IM3JOIN1-` and
+containing at most 153 characters. The guest supplies `name` and `invite`.
+Without `address`, `invite` returns a 137-character `IM3TLS1.` token. Joining
+with that token also requires the host's `address` and `port`.
+The host reports a `join` event after authentication succeeds.
 
 `status` never returns the invitation. Only an explicit `invite` command retrieves
 it from a listening TLS host. A new host endpoint generates a new invitation;
@@ -3035,14 +2879,9 @@ A name in `closed`/`error` state can be hosted/joined again.
 !else { !log | lan.error |+| } |+|
 ```
 
-`addresses` asks the operating system for addresses already assigned to its
-active network interfaces. It does not invent an address, contact an external
-IP service, perform a DNS lookup, open a connection, or change firewall/router
-settings. Windows uses its installed `iphlpapi` API through LuaJIT FFI;
-Linux/macOS use `getifaddrs` in their system C library. No extra project file,
-DLL download, or package is required. References: [Windows adapter enumeration](https://learn.microsoft.com/en-us/windows/win32/api/iphlpapi/nf-iphlpapi-getadaptersaddresses),
-[Linux](https://man7.org/linux/man-pages/man3/getifaddrs.3.html),
-[macOS](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/getifaddrs.3.html).
+`addresses` returns IPv4 addresses assigned to active local network interfaces.
+It does not generate a new IP address, discover a public router address, or
+change network/firewall settings.
 
 Result fields:
 
@@ -3106,7 +2945,7 @@ weakens protection. They do not change graphics/model limits.
 
 | Attribute | Default | Meaning |
 | --- | --- | --- |
-| `message_limit` | `1048576` bytes | Maximum encoded frame payload, including format byte. TLS needs at least `64` or `0` for its internal authentication frame. |
+| `message_limit` | `1048576` bytes | Maximum encoded frame payload, including format byte. TLS requires at least `64`, or `0` to disable the limit. |
 | `buffer_limit` | `8388608` bytes | Per-peer outgoing queue and incoming payload/inbox buffering. TLS needs at least `64` or `0`. |
 | `queue_limit` | `33554432` bytes | Aggregate engine buffering per endpoint, including event metadata, frame queues, and TLS I/O buffers. Must be `0` or at least `1024`. Not a measure of all native-library/kernel memory. |
 | `event_limit` | `1024` | Queued events, including joins, leaves, errors, and messages. |
@@ -3190,32 +3029,16 @@ string variable instead. A network message never automatically accesses the
 clipboard. Copying replaces clipboard text, and OS clipboard history/sync may
 retain it: treat invitations as private credentials.
 
-### Cleanup and transport
+### Connection lifetime
 
-Socket calls are nonblocking and handled in rotating chunks. JSON processing,
-TLS operations, credential creation, and an individual command are synchronous;
-the tick budget cannot interrupt a native call already in progress.
+Stop, Execute, program completion, shutdown, and engine unload close the
+program's connections and discard pending queues. Connections do not reconnect
+automatically. A client can rejoin with the same invitation while the host
+endpoint remains open.
 
-Stop, Execute, program completion, shutdown, and engine unload close sockets,
-free TLS contexts, and discard queues without waiting for peers. Windows hosts
-create a temporary named key in the Windows CNG keystore for Schannel; normal
-endpoint cleanup deletes it. Certificates are generated in memory, with no
-certificate download/file or distributed DLL. An abrupt process crash may leave
-an orphaned OS-managed key. OpenSSL keys/certificates are held in memory.
-Connections do not reconnect automatically. A client may rejoin using the same
-invitation while that host endpoint remains alive.
-
-Inside TLS, a four-byte unsigned **big-endian** length precedes each payload.
-The first client payload is `A` followed by the invitation's raw 32-byte secret;
-after verification the host returns `K`. These internal authentication frames
-are not exposed to the game. Normal payloads are `T` + raw text bytes, or
-`J` + UTF-8 JSON `{"data":value}`. Compatible external clients must implement
-TLS, certificate pinning, authentication, and this framing; explicit plain mode
-uses only the legacy T/J framing. This is not OBS WebSocket. TCP preserves byte
-order, but games define authority, synchronization, and interpolation.
-
-LAN/internet use the same commands if the firewall/router allows reaching the
-host; the engine does not configure either or provide router traversal.
+Scripts define message formats, authority, synchronization, and interpolation.
+LAN and internet use the same commands when the host is reachable; the engine
+does not configure firewalls or routers.
 
 ## Fetching data and optional Lua modules
 
@@ -3230,7 +3053,7 @@ HTTP/HTTPS, and limits each request to 20 seconds. A request failure or timeout
 reports an error instead of assigning an empty successful response. The
 positional destination form `!fetch | url | response |+|` also works. A decoded
 JSON object/array is returned when parsing succeeds; otherwise the response is
-text. Temporary helper files are removed when the request completes or times out.
+text.
 
 Module paths may be bare or quoted; quote paths containing spaces. Relative paths follow the entry program directory. An optional Lua module returns an installer function. Its command registrations
 are published together only after installation succeeds:
@@ -3246,15 +3069,12 @@ end
 
 The last argument to `register_command` selects raw arguments (`true`) or
 evaluated arguments (`false`); the choice belongs to that program's registration.
-Loading another program's module cannot change it. The engine's Lua command
-registry is named `engine`, with argument policies in `engine_raw`. Use the
-module's registration API for extensions. These Lua names do not change the
-language's `!command | ... |+|` syntax. Lua modules run inside OBS; load only
-modules you trust.
+Loading another module cannot change it. Use `api.register_command` for
+extensions. Lua modules run inside OBS; load only modules you trust.
 
 ## Command reference
 
-This index covers the engine's public command families. `[…]` means optional; `name`/`label` are programmer-chosen identifiers. `|+|` ends each statement, even when omitted from a compact signature below. Internal compiler commands beginning `__` are not program APIs. A module may register additional commands, but those are not part of the core language.
+This index covers the engine's public command families. `[…]` means optional; `name`/`label` are programmer-chosen identifiers. `|+|` ends each statement, even when omitted from a compact signature below. A module may register additional commands, but those are not part of the core language.
 
 ### State, flow, and diagnostics
 
@@ -3326,7 +3146,7 @@ This index covers the engine's public command families. `[…]` means optional; 
 | `!fetch` | `url \| destination_variable`; fetch external data, using a `curl` helper on the host. Not needed for local programs. |
 | `!module` | `load \| path/to/module.lua`; optional Lua extension that can register commands. Core canvas, animation, input, and worker syntax does not require it. |
 
-Selected OBS source methods such as `!pos` and `!text` are resolved after built-in commands. The engine also exposes script functions through `@name(...)` and math functions, for example `math.min(a,b)`; these are distinct from `!fn` declarations. The existing `@` and source-method surface is broader than the stable command families above, so inspect the current engine or focused examples for a specific advanced method.
+Selected OBS source methods such as `!pos` and `!text` are resolved after built-in commands. The engine also exposes script functions through `@name(...)` and math functions, for example `math.min(a,b)`; these are distinct from `!fn` declarations.
 
 ## Advanced syntax and compatibility
 
@@ -3366,7 +3186,7 @@ positions. It returns a fresh record and does not modify either input.
 The query measures a selected plane. A script can check height separately for
 ground-level collisions. It does not apply movement, damage, or velocity changes.
 
-`@fps()` returns OBS's measured active video frame rate through `obs_get_active_fps`.
+`@fps()` returns OBS's measured active video frame rate.
 It returns `0` when OBS cannot supply a valid positive reading. This is the OBS
 video rate, not the rate at which a script finishes a logical frame or a worker
 updates simulation data. A script may take several OBS ticks to reach its next
@@ -3378,10 +3198,7 @@ updates simulation data. A script may take several OBS ticks to reach its next
 ```
 
 For the second value, sample `tick` once per logical frame after `!wait | frame`.
-Average readings over time for a stable display; do not treat one sample as a
-GPU benchmark. Identical 3D camera/object updates preserve the cached scene;
-changed transforms still trigger a redraw. Explicit mesh geometry or texture
-replacement continues to rebuild/reload the supplied resource.
+Average readings over time for a stable display.
 
 ### Easing names
 
@@ -3423,7 +3240,7 @@ The parser also recognizes `[[variable1,variable2]] [label] !command...` to watc
 
 - **A renderer is an OBS source; a canvas is an in-memory pixel buffer.** `!renderer | create` handles the scene item. `!canvas | create` handles drawing data. `!canvas | update` connects a finished frame to that source. Several canvas buffers can coexist and `use` switches without clearing.
 - **A command that waits remains the current command.** `!wait`, an animation over time, `!await`, and similar commands return to OBS and resume on later ticks. `!wait | frame` is the explicit frame boundary for games.
-- **The budget is shared work, not an animation delay.** Raising it can allow more game logic in one tick, but can also make OBS less responsive. The engine also has a 1,000-command safety backstop and detects loops that keep exhausting budgets without yielding.
+- **The budget is shared work, not an animation delay.** Raising it can allow more game logic in one tick, but can also make OBS less responsive. Use `!wait | frame` in long-running loops to yield between updates.
 - **`!canvas | snapshot`/`restore` can avoid redrawing a static map.** Draw the map once, snapshot it, then restore and draw moving objects each frame. Call `update` after the completed frame.
 - **Packed art is decoded once when defined.** Reuse `!sprite | draw` or `!animation | draw` each frame rather than rebuilding the definition. `transparent` palette entries preserve pixels already on the canvas.
 - **An animation does not keep its own clock.** Pass a seconds value to `time`; increment it with `tick`, or set it directly to pause, replay, or seek.
@@ -3439,8 +3256,7 @@ Unknown commands can include a `did you mean !command?` hint. Hints do not
 redirect execution: built-ins, functions, widgets, modules, and selected-source
 methods keep their existing resolution rules. Compatibility aliases remain
 supported; error messages prefer the documented names (`read`, `release`,
-`remove`/`clear`, `update`, and `connection`). Legacy positional input outputs
-now report type mismatches just like arrow result records.
+`remove`/`clear`, `update`, and `connection`). Positional input outputs and arrow result records both report type mismatches.
 
 | Symptom | Check |
 | --- | --- |
