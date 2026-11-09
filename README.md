@@ -1392,10 +1392,9 @@ with `|`, in any order after the action and control name:
     !ui | input | name | x:20,y:72,width:540,bind:player_name,placeholder:"Your name" |+|
     !ui | button | play | text:"Play",x:20,y:140,width:240 |+|
     !ui | label | message | text:"Ready",x:20,y:210,width:540 |+|
-} |+|
-
-!play | click | {
-    !message | text:("Hello "..player_name) |+|
+    !play | click | {
+        !message | text:("Hello "..player_name) |+|
+    } |+|
 } |+|
 ```
 
@@ -1437,7 +1436,7 @@ layout using the new canvas dimensions.
 
 Set these attributes on creation or through the widget's command. For example,
 `!menu | width:75%,max_width:560 |+|` reflows its children immediately.
-`!resume | -> | bounds |+|` returns the resolved canvas-space rectangle in
+`!ui | get | resume | -> | bounds |+|` returns the resolved canvas-space rectangle in
 `bounds.x`, `bounds.y`, `bounds.width`, and `bounds.height`. The same
 layout drives pointer hit testing in the OBS preview and projector.
 
@@ -1471,12 +1470,32 @@ the same grouped/ungrouped syntax, expressions, validation, and style behavior.
 !my_button | delete |+|            -- delete the widget
 ```
 
+Widget names are local to their declaration scope. A widget declared in a
+frame block is accessible by name inside that frame and its nested frames.
+Widgets declared inside a function are local to that call. A listener can
+use the widgets visible where you register it. The `parent:` attribute places
+a widget inside a frame without changing its declaration scope.
+
+Use `!ui | get` to look up a widget by name from another scope. Use the result
+variable as a widget command or pass it to an explicit `!ui` action.
+
+```text
+!ui | get | play | -> | play_ref |+|
+!play_ref | text:"Continue" |+|
+!ui | hide | play_ref |+|
+```
+
+The returned fields describe the widget at lookup time. To read fresh state,
+call `get` again. A reference expires when its widget is deleted or the UI is
+cleared. Creating a new widget with the same name requires a fresh lookup.
+Widget names must be unique within the program.
+
 All widget types use the same named form.
 Inputs also support `!field | value | -> | entered`, `!field | value:"New text"`,
 `!field | focus`, `!field | blur`, `!field | paste`, and `!field | copy`.
 A widget's `blur` only clears focus if that widget owns it.
 
-The older forms remain equivalent: `!ui | set | my_button | text:"Continue"`
+The explicit forms follow the same scope rules: `!ui | set | my_button | text:"Continue"`
 and `!ui | click | my_button | { ... }` still work. Listener replacement and
 removal work across both forms because they address the same control/binding.
 `off` remains a compatibility alias for removing listeners. The older
