@@ -1365,7 +1365,7 @@ function compile_line(cmd, args)
         local own_arrow=cmd=="call" or cmd=="spawn" or cmd=="start_independent_task" or
             cmd=="then" or cmd=="execute_command"
         if not result_error and not own_arrow then
-            args={}
+            args={_ui_parent=original_args._ui_parent,_ui_member=original_args._ui_member}
             for index=1,arrow_index-1 do args[index]=original_args[index] end
             if engine[cmd] then
                 local action=tostring(args[1] or ""):lower()
@@ -1583,6 +1583,9 @@ function compile_line(cmd, args)
     -- Suggestions are error-only work. They never redirect a valid function,
     -- widget, module, or selected source method to a different command.
     local function command_hint(src)
+        if src.ui_state and src.ui_state.widgets[cmd] then
+            return '; widget is outside this scope, use !ui | get first'
+        end
         if #cmd>64 then return '' end
         local wanted=cmd:lower();local best,score=nil,#wanted<=4 and 1 or 2
         local function consider(name)
@@ -1600,7 +1603,9 @@ function compile_line(cmd, args)
         end
         for name in pairs(engine) do consider(name) end
         for name in pairs(src.functions or {}) do consider(name) end
-        for name in pairs(src.ui_state and src.ui_state.widgets or {}) do consider(name) end
+        for name,widget in pairs(src.ui_state and src.ui_state.widgets or {}) do
+            if ENGINE_UI.visible(src,widget,original_args._ui_parent) then consider(name) end
+        end
         return best and ('; did you mean !'..best..'?') or ''
     end
     -- fallback object method invocation
@@ -1616,7 +1621,7 @@ function compile_line(cmd, args)
         if src.functions and src.functions[cmd] then
             return prepare_function_call(src, cmd, original_args)
         end
-        if src.ui_state and src.ui_state.widgets[cmd] then
+        if ENGINE_UI.member(src,cmd,original_args._ui_parent) then
             widget_command=widget_command or ENGINE_UI.compile_member(cmd,original_args)
             return widget_command(src,override_state or src.state)
         end
@@ -4977,9 +4982,16 @@ local function world3d_new_world()
 end
 -- Optional D3D11 acceleration uses only public COM interfaces on OBS's device.
 -- No private OBS layouts or Lua callbacks are installed in the graphics API.
-WORLD3D_NATIVE={}
+WORLD3D_NATIVE={method_types={}}
 function WORLD3D_NATIVE.method(object,index,signature)
-    return ffi.cast(signature,ffi.cast("void ***",object)[0][index])
+    -- LuaJIT allocates a ctype for each textual function-pointer cast.
+    -- Native draws release saved COM references on every batch.
+    local method_type=WORLD3D_NATIVE.method_types[signature]
+    if not method_type then
+        method_type=ffi.typeof(signature)
+        WORLD3D_NATIVE.method_types[signature]=method_type
+    end
+    return ffi.cast(method_type,ffi.cast("void ***",object)[0][index])
 end
 function WORLD3D_NATIVE.release(object)
     if object~=nil then
@@ -10075,7 +10087,7 @@ function INPUT_EVENTS.compile(ctx,args,line,command,cmd)
     local context=ctx.next_context_id or 1;ctx.next_context_id=context+1
     ctx.function_contexts=ctx.function_contexts or {}
     ctx.function_contexts[context]=cmd..' '..tostring(code.kind)..' '..tostring(code.key)
-    local queue,labels=compile_block_text(ctx,body:sub(2,-2)..'\n!return |+|',context)
+    local queue,labels=compile_block_text(ctx,body:sub(2,-2)..'\n!return |+|',context,args._ui_parent)
     if queue._function_label_error then return nil,'Event Error: Global labels are not allowed inside event handlers' end
     local header=(command or ''):find(body,1,true)
     local _,newlines=((header and command:sub(1,header-1)) or ''):gsub('\n','')
@@ -10216,10 +10228,15 @@ function INPUT_EVENTS.register(ctx,args,cmd)
         args._input_handler=code
     end
     if code.selector then
-        local ui=ctx.ui_state
-        local value=code.family=='input_action' and ctx.input_actions and ctx.input_actions[code.selector] and code.selector or
-            code.family=='ui' and ui and ui.widgets[code.selector] and code.selector or
-            resolve_command_value(ctx,code.selector)
+        local value
+        if code.family=='ui' then
+            local widget,problem=ENGINE_UI.target(ctx,code.selector,args._ui_parent,false)
+            if not widget then return false,'UI Error: '..problem end
+            value=widget.name
+        else
+            value=code.family=='input_action' and ctx.input_actions and ctx.input_actions[code.selector] and code.selector or
+                resolve_command_value(ctx,code.selector)
+        end
         if is_fatal(value) then return false,'Event Error: '..tostring(value.msg) end
         -- Worker/connection records also live in variables bearing their ID.
         -- Those records identify a resource; they are not replacement ID text.
@@ -10319,7 +10336,7 @@ function INPUT_EVENTS.dispatch(ctx,binding)
     local code,parent=binding.code,binding.scope
     local event=binding.pending
     local scope=setmetatable({event=event,tick=event.dt or 0},{
-        __index=parent,__newindex=function(t,k,v)
+        __index=parent,_ui_callback_parent=parent,__newindex=function(t,k,v)
             local owner=retrieve_scope(parent,k)
             if owner then owner[k]=v else rawset(t,k,v) end
         end})
@@ -12927,6 +12944,53 @@ end
 -- Widget commands are resolved against the running program, never registered
 -- in engine. Removing a control cannot leave a global command or a stale
 -- reference to its instance; existing built-ins and functions keep precedence.
+function ENGINE_UI.visible(ctx,w,parent)
+    local scope=ctx.active_scope
+    while scope and scope~=w.scope do
+        local mt=getmetatable(scope)
+        scope=mt and mt._ui_callback_parent
+    end
+    if scope~=w.scope then return false end
+    local widgets=ctx.ui_state.widgets
+    while parent and parent~=w.ui_parent do
+        local name=parent:match('^"(.*)"$') or parent:match("^'(.*)'$") or parent
+        local container=widgets[name]
+        parent=container and container.ui_parent
+    end
+    return parent==w.ui_parent
+end
+function ENGINE_UI.reference(ui,value)
+    local reference=type(value)=='table' and ui.references and ui.references[value]
+    local widget=reference and ui.widgets[reference.name]
+    if widget and widget.identity==reference then return widget end
+end
+function ENGINE_UI.target(ctx,selector,parent,lookup)
+    local ui=ctx.ui_state
+    if not ui then return nil,'Create a UI first with !ui | create' end
+    local literal=selector:match('^"(.*)"$') or selector:match("^'(.*)'$") or selector
+    local widget=ui.widgets[literal]
+    if widget and (lookup or ENGINE_UI.visible(ctx,widget,parent)) then return widget end
+    local value=resolve_command_value(ctx,selector)
+    if type(value)=='table' and ui.references and ui.references[value] then
+        local reference=ENGINE_UI.reference(ui,value)
+        if reference then return reference end
+        return nil,'Widget reference has expired; use !ui | get again'
+    end
+    if not widget and (type(value)=='string' or type(value)=='number') then widget=ui.widgets[tostring(value)] end
+    if widget then
+        if lookup or ENGINE_UI.visible(ctx,widget,parent) then return widget end
+        return nil,"Control '"..widget.name.."' is outside this scope; use !ui | get first"
+    end
+    return nil,"No accessible control named '"..literal.."'"
+end
+function ENGINE_UI.member(ctx,name,parent)
+    local ui=ctx.ui_state
+    if not ui then return end
+    local widget=ui.widgets[name]
+    if widget and ENGINE_UI.visible(ctx,widget,parent) then return widget end
+    local _,value=retrieve_scope(ctx.active_scope,name)
+    return ENGINE_UI.reference(ui,value)
+end
 function ENGINE_UI.compile_member(name,args)
     local first=safe_trim(tostring(args[1] or ''))
     local action=first:lower()
@@ -12944,12 +13008,13 @@ function ENGINE_UI.compile_member(name,args)
     else
         return function() return false,'UI Error: Unknown widget action '..first..'; use attributes or an event name' end
     end
+    forwarded._ui_parent,forwarded._ui_member=args._ui_parent,true
     local handler=INPUT_EVENTS.is_handler('ui',forwarded)
     if action=='blur' and not handler then
         if #args~=1 then return function() return false,'UI Error: Widget blur takes no attributes' end end
         return function(ctx)
             local ui=ctx.ui_state
-            if ui and ui.focus==ui.widgets[name] then ENGINE_UI.focus(ctx,nil) end
+            if ui and ui.focus==ENGINE_UI.member(ctx,name,args._ui_parent) then ENGINE_UI.focus(ctx,nil) end
             return true
         end
     end
@@ -13041,11 +13106,15 @@ engine.ui=function(ctx,state,args)
     -- happens to use the same spelling. Only an alias without a widget ID is
     -- evaluated as a value by the generic !ui forms.
     local declaration=ENGINE_UI.kinds[action] or action=='style'
-    local name,problem
-    if declaration or ui.widgets[raw_name] then
+    local name,w
+    if declaration then
         name=raw_name:match('^"(.*)"$') or raw_name:match("^'(.*)'$") or raw_name
-    else name,problem=resolve_command_text(ctx,raw_name) end
-    if not name then return fail(problem) end
+    else
+        local problem
+        w,problem=ENGINE_UI.target(ctx,raw_name,args._ui_parent,action=='get' and not args._ui_member)
+        if not w then return fail(problem) end
+        name=w.name
+    end
     if name=='' then return fail('Missing control name') end
     if action=='style' then
         local allowed={font=true};for key in pairs(ENGINE_UI.defaults) do allowed[key]=true end
@@ -13065,7 +13134,7 @@ engine.ui=function(ctx,state,args)
     if ENGINE_UI.kinds[action] then
         if ui.widgets[name] then return fail('Control '..name..' already exists; use set to change it') end
         local fields,why=ENGINE_UI.attributes(ctx,args,3,ENGINE_UI.allowed(action));if not fields then return fail(why) end
-        local w={name=name,kind=action,surface=ui.selected,scope=ctx.active_scope,x=0,y=0,width=200,height=44,
+        local w={name=name,kind=action,surface=ui.selected,scope=ctx.active_scope,ui_parent=args._ui_parent,x=0,y=0,width=200,height=44,
             visible=action~='modal' and action~='toast',enabled=true,font='readable',text='',placeholder='',value='',checked=false,password=false,
             max_length=256,min=0,max=100,step=1,caret=0,anchor=0}
         if ENGINE_UI.scrollable[action] then w.offset=0 end
@@ -13110,7 +13179,6 @@ engine.ui=function(ctx,state,args)
         if ENGINE_UI.scrollable[action] then ui.wheel_widgets=ui.wheel_widgets+1 end
         ui.widgets[name]=w;ui.order[#ui.order+1]=w;w.surface.dirty=true;ui.layout_dirty=true;return true
     end
-    local w=ui.widgets[name];if not w then return fail('No control named '..name) end
     if action=='off' or action=='clear' or action=='remove' and #args>2 then
         if #args>3 then return fail(action..' takes a control name and optional event kind') end
         local kind=args[3] and safe_trim(tostring(args[3])):lower()
@@ -13155,7 +13223,11 @@ engine.ui=function(ctx,state,args)
         if action=='get' then value={name=w.name,kind=w.kind,text=w.items and w.items[w.value] or w.text,value=value,checked=w.checked and 1 or 0,
             x=w.ax,y=w.ay,width=w.aw,height=w.ah,visible=w.shown and 1 or 0,enabled=w.active and 1 or 0,
             focused=ui.focus==w and 1 or 0,hovered=ui.hover==w and 1 or 0,offset=w.offset,
-            open=(ui.popup==w or (w.kind=='modal' or w.kind=='toast') and w.shown) and 1 or 0} end
+            open=(ui.popup==w or (w.kind=='modal' or w.kind=='toast') and w.shown) and 1 or 0}
+            ui.references=ui.references or setmetatable({},{__mode='k'})
+            w.identity=w.identity or {name=w.name}
+            ui.references[value]=w.identity
+        end
         local result=update_variable_state(ctx,fields.into,value);if is_fatal(result) then return fail(result.msg) end;return true
     elseif action=='set' then
         local allowed=ENGINE_UI.allowed(w.kind);allowed.parent=nil;allowed.bind=nil;allowed.tabs=nil;allowed.tab=nil
@@ -21151,7 +21223,7 @@ function run_code(src, settings, restart_scene_id, restart_screen)
     -- end
 end
 
-function compile_block_text(src, raw_code, ctx_id)
+function compile_block_text(src, raw_code, ctx_id, initial_ui_parent)
     ctx_id = ctx_id or 0
     local function_owner=src.function_contexts and
         (src.function_contexts[ctx_id] or src.function_contexts[src.context_id])
@@ -21307,12 +21379,12 @@ function compile_block_text(src, raw_code, ctx_id)
     local for_number, if_number = 0, 0
     local function expand_control_blocks(input,ui_parent)
         local output = {}
-        local function emit(value, line)
-            output[#output + 1] = {text = value, line = line}
+        local function emit(value, line,parent)
+            output[#output + 1] = {text = value, line = line,ui_parent=parent or ui_parent}
         end
         local function emit_body(body, line,child_parent)
             for _, nested in ipairs(expand_control_blocks(smart_split(body:sub(2, -2)),child_parent or ui_parent)) do
-                emit(nested.text, (line or 1) + (nested.line or 1) - 1)
+                emit(nested.text, (line or 1) + (nested.line or 1) - 1,nested.ui_parent)
             end
         end
         local function inline_else_body(text)
@@ -21435,7 +21507,7 @@ function compile_block_text(src, raw_code, ctx_id)
         end
         return output
     end
-    steps = expand_control_blocks(steps)
+    steps = expand_control_blocks(steps,initial_ui_parent)
     local skip_ranges = {}
     local skip_stack = {}
 
@@ -21559,6 +21631,7 @@ function compile_block_text(src, raw_code, ctx_id)
                 else
                     local cmd = safe_trim(parts[1] or "")
                     table.remove(parts, 1)
+                    parts._ui_parent=step_obj.ui_parent
                     -- Unknown command names may resolve to program-owned UI
                     -- controls at execution time. Preserve callback locations
                     -- without interpreting function arguments as UI syntax.
